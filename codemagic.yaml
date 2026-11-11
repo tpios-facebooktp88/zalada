@@ -1,18 +1,32 @@
+workflows:
+  dylib-build:
+    name: LazadaFarm - Build Dylib
+    max_build_duration: 60
+    environment:
+      xcode: 16.4
+    scripts:
       - name: Build dylib
         script: |
           set -e
-          xcrun -sdk iphoneos clang++ \
-            -arch arm64 \
-            -mios-version-min=16.0 \
-            -dynamiclib \
+          SDKROOT="$(xcrun --sdk iphoneos --show-sdk-path)"
+          mkdir -p build
+          xcrun clang \
+            -target arm64-apple-ios16.0 \
+            -isysroot "$SDKROOT" \
             -fobjc-arc \
-            -ObjC \
-            -all_load \
+            -dynamiclib \
+            -Xlinker -undefined \
+            -Xlinker dynamic_lookup \
             -framework Foundation \
             -framework WebKit \
             -framework UIKit \
-            -framework CoreGraphics \
-            -lobjc \
-            -install_name @rpath/lazada.dylib \
-            -o lazada.dylib \
+            -o build/lazada.dylib \
             LazadaFarm/Tweak.mm
+
+      - name: Package
+        script: |
+          mkdir -p output
+          cp build/lazada.dylib output/lazada_$BUILD_NUMBER.dylib
+
+    artifacts:
+      - output/lazada_*.dylib
