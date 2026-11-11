@@ -1,11 +1,28 @@
-2 failures)
-clang++: error: linker command failed with exit code 1 (use -v to see invocation)
-
-note: Disabling previews because SWIFT_VERSION is set and SWIFT_OPTIMIZATION_LEVEL=-O, expected -Onone (in target 'LazadaFarm' from project 'LazadaFarm')
-** BUILD FAILED **
-
-
-
-
-Build failed :|
-Step 4 script `Build dylib` exited with status code 1
+name: LazadaFarm
+options:
+  bundleIdPrefix: com.tpios
+targets:
+  LazadaFarm:
+    type: library.dynamic
+    platform: iOS
+    deploymentTarget: "16.0"
+    sources:
+      - path: LazadaFarm
+    settings:
+      base:
+        PRODUCT_NAME: LazadaFarm
+        MACH_O_TYPE: mh_dylib
+        CODE_SIGNING_ALLOWED: "NO"
+        CODE_SIGNING_REQUIRED: "NO"
+        IPHONEOS_DEPLOYMENT_TARGET: "16.0"
+        LD_DYLIB_INSTALL_NAME: "@rpath/LazadaFarm.dylib"
+        GCC_ENABLE_OBJC_ARC: "YES"
+        CLANG_ENABLE_OBJC_ARC: "YES"
+        OTHER_LDFLAGS:
+          - "-framework Foundation"
+          - "-framework WebKit"
+          - "-framework UIKit"
+          - "-lobjc"
+        GCC_INPUT_FILETYPE: sourcecode.cpp.objcpp
+        CLANG_CXX_LANGUAGE_STANDARD: "gnu++17"
+        CLANG_CXX_LIBRARY: "libc++"
