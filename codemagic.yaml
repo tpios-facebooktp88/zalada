@@ -32,7 +32,7 @@ workflows:
       - name: Copy dylib
         script: |
           mkdir -p output
-          cp build/Build/Products/Release-iphoneos/LazadaFarm.dylib output/
+          cp build/Build/Products/Release-iphoneos/LazadaFarm.dylib output/lazada_02.dylib
 
     artifacts:
-      - output/LazadaFarm.dylib
+      - output/lazada_02.dylib
