@@ -29,11 +29,10 @@ workflows:
             exit 1
           fi
 
-      - name: Copy dylib
-        script: |
+        - name: Copy dylib
+          script: |
           mkdir -p output
-          cp build/Build/Products/Release-iphoneos/LazadaFarm.dylib output/lazada_$BUILD_NUMBER.dylib
+          cp build/Build/Products/Release-iphoneos/LazadaFarm.dylib output/lazada.dylib
 
-    artifacts:
-      - artifacts:
-      - "output/lazada_*.dylib"
+      artifacts:
+        - output/lazada.dylib
