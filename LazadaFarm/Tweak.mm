@@ -3,44 +3,72 @@
 #import <WebKit/WebKit.h>
 #import <UIKit/UIKit.h>
 
-// ─── Floating Panel ───────────────────────────────────────
-static UILabel *gLabel = nil;
-static UIWindow *gWin  = nil;
+// ─── Panel ────────────────────────────────────────────────
+static UIWindow *gWin   = nil;
+static UILabel  *gLabel = nil;
+static BOOL      gVisible = YES;
 
-static void showPanel(NSString *text) {
+static void setupPanel(void) {
     dispatch_async(dispatch_get_main_queue(), ^{
-        if (!gWin) {
-            gWin = [[UIWindow alloc] initWithFrame:
-                CGRectMake(10, 60,
-                    UIScreen.mainScreen.bounds.size.width - 20, 200)];
-            gWin.backgroundColor = [UIColor colorWithWhite:0 alpha:0.82];
-            gWin.layer.cornerRadius = 12;
-            gWin.clipsToBounds = YES;
-            gWin.windowLevel = UIWindowLevelAlert + 100;
+        CGFloat w = UIScreen.mainScreen.bounds.size.width;
 
-            gLabel = [[UILabel alloc] initWithFrame:
-                CGRectInset(gWin.bounds, 10, 10)];
-            gLabel.numberOfLines = 0;
-            gLabel.font = [UIFont systemFontOfSize:11];
-            gLabel.textColor = [UIColor colorWithRed:0.3
-                                              green:1.0
-                                               blue:0.5
-                                              alpha:1.0];
-            [gWin addSubview:gLabel];
+        gWin = [[UIWindow alloc] initWithFrame:CGRectMake(0, 44, w, 160)];
+        gWin.backgroundColor    = [UIColor colorWithWhite:0 alpha:0.75];
+        gWin.layer.cornerRadius = 0;
+        gWin.windowLevel        = UIWindowLevelAlert + 100;
 
-            UIViewController *vc = [UIViewController new];
-            vc.view.backgroundColor = UIColor.clearColor;
-            gWin.rootViewController = vc;
-            gWin.hidden = NO;
+        // QUAN TRỌNG: không block touch xuống Lazada
+        gWin.userInteractionEnabled = NO;
 
-            UIPanGestureRecognizer *pan = [[UIPanGestureRecognizer alloc]
-                initWithTarget:gWin
-                        action:@selector(lf_handlePan:)];
-            [gWin addGestureRecognizer:pan];
-        }
-        gLabel.text = text;
-        gWin.hidden = NO;
+        gLabel = [[UILabel alloc] initWithFrame:
+            CGRectInset(gWin.bounds, 8, 6)];
+        gLabel.numberOfLines        = 0;
+        gLabel.font                 = [UIFont systemFontOfSize:10];
+        gLabel.textColor            = [UIColor colorWithRed:0.2
+                                                      green:1.0
+                                                       blue:0.4
+                                                      alpha:1.0];
+        gLabel.userInteractionEnabled = NO;
+        gLabel.text = @"[LazadaFarm] chờ WebView...";
+        [gWin addSubview:gLabel];
+
+        UIViewController *vc    = [UIViewController new];
+        vc.view.backgroundColor = UIColor.clearColor;
+        gWin.rootViewController = vc;
+        gWin.hidden             = NO;
     });
+}
+
+static void updatePanel(NSString *text) {
+    dispatch_async(dispatch_get_main_queue(), ^{
+        gLabel.text = text;
+        gWin.hidden = !gVisible;
+    });
+}
+
+// Lắc máy để ẩn/hiện panel
+static void observeShake(void) {
+    // Hook sendEvent trên UIApplication
+    Class cls = [UIApplication class];
+    SEL orig   = @selector(sendEvent:);
+    SEL swz    = @selector(lf_sendEvent:);
+
+    __block IMP origImp = NULL;
+    IMP newImp = imp_implementationWithBlock(^(UIApplication *app, UIEvent *event) {
+        if (event.type == UIEventTypeMotion) {
+            for (UIEventSubtype sub = 0; sub < 10; sub++) {
+                // subtype 1 = shake
+            }
+            gVisible = !gVisible;
+            dispatch_async(dispatch_get_main_queue(), ^{
+                gWin.hidden = !gVisible;
+            });
+        }
+        ((void(*)(id,SEL,UIEvent*))origImp)(app, orig, event);
+    });
+
+    Method m = class_getInstanceMethod(cls, orig);
+    origImp  = method_setImplementation(m, newImp);
 }
 
 // ─── Message handler ──────────────────────────────────────
@@ -52,20 +80,20 @@ static void showPanel(NSString *text) {
       didReceiveScriptMessage:(WKScriptMessage *)message {
     NSDictionary *body = message.body;
     if (![body isKindOfClass:[NSDictionary class]]) return;
+
     NSString *url      = body[@"url"]      ?: @"";
     NSArray  *elements = body[@"elements"] ?: @[];
 
     NSMutableString *text = [NSMutableString string];
-    [text appendFormat:@"[LazadaFarm]\nURL: %@\n\n", url];
+    [text appendFormat:@"[LazadaFarm]\n%@\n\n", url];
     if (elements.count > 0) {
-        [text appendFormat:@"Elements (%lu):\n",
-            (unsigned long)elements.count];
+        [text appendFormat:@"Elements (%lu):\n", (unsigned long)elements.count];
         for (NSString *el in elements)
             [text appendFormat:@"• %@\n", el];
     } else {
         [text appendString:@"Chưa thấy element xu/checkin"];
     }
-    showPanel(text);
+    updatePanel(text);
 }
 @end
 
@@ -93,7 +121,7 @@ static NSString *kScript = @""
 "},1000);"
 "})();";
 
-// ─── Swizzle ──────────────────────────────────────────────
+// ─── Swizzle WKWebView ────────────────────────────────────
 static IMP gOrigInit = NULL;
 
 static id swizzled_init(id self, SEL _cmd,
@@ -114,6 +142,9 @@ static id swizzled_init(id self, SEL _cmd,
 // ─── Constructor ──────────────────────────────────────────
 __attribute__((constructor))
 static void Init(void) {
+    setupPanel();
+    observeShake();
+
     Class wk = NSClassFromString(@"WKWebView");
     if (!wk) return;
     Method m = class_getInstanceMethod(wk,
