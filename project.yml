@@ -3,7 +3,7 @@ options:
   bundleIdPrefix: com.tpios
 targets:
   LazadaFarm:
-    type: dynamic-library
+    type: library.dynamic
     platform: iOS
     deploymentTarget: "16.0"
     sources:
