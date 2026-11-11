@@ -36,4 +36,4 @@ workflows:
 
     artifacts:
       - artifacts:
-      - output/lazada_*.dylib
+      - "output/lazada_*.dylib"
