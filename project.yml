@@ -1,0 +1,20 @@
+name: LazadaFarm
+options:
+  bundleIdPrefix: com.tpios
+targets:
+  LazadaFarm:
+    type: dynamic-library
+    platform: iOS
+    deploymentTarget: "16.0"
+    sources:
+      - path: LazadaFarm
+    settings:
+      base:
+        PRODUCT_NAME: LazadaFarm
+        MACH_O_TYPE: mh_dylib
+        CODE_SIGNING_ALLOWED: "NO"
+        CODE_SIGNING_REQUIRED: "NO"
+        IPHONEOS_DEPLOYMENT_TARGET: "16.0"
+        LD_DYLIB_INSTALL_NAME: "@rpath/LazadaFarm.dylib"
+        SWIFT_VERSION: "5.0"
+        OTHER_LDFLAGS: "-framework Foundation -framework WebKit -framework UIKit"
