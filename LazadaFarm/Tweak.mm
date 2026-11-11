@@ -4,8 +4,8 @@
 #import <UIKit/UIKit.h>
 
 // ─── Panel ────────────────────────────────────────────────
-static UIWindow *gWin   = nil;
-static UILabel  *gLabel = nil;
+static UIWindow *gWin    = nil;
+static UILabel  *gLabel  = nil;
 static BOOL      gVisible = YES;
 
 static void setupPanel(void) {
@@ -13,23 +13,19 @@ static void setupPanel(void) {
         CGFloat w = UIScreen.mainScreen.bounds.size.width;
 
         gWin = [[UIWindow alloc] initWithFrame:CGRectMake(0, 44, w, 160)];
-        gWin.backgroundColor    = [UIColor colorWithWhite:0 alpha:0.75];
-        gWin.layer.cornerRadius = 0;
-        gWin.windowLevel        = UIWindowLevelAlert + 100;
-
-        // QUAN TRỌNG: không block touch xuống Lazada
+        gWin.backgroundColor        = [UIColor colorWithWhite:0 alpha:0.75];
+        gWin.windowLevel            = UIWindowLevelAlert + 100;
         gWin.userInteractionEnabled = NO;
 
-        gLabel = [[UILabel alloc] initWithFrame:
-            CGRectInset(gWin.bounds, 8, 6)];
-        gLabel.numberOfLines        = 0;
-        gLabel.font                 = [UIFont systemFontOfSize:10];
-        gLabel.textColor            = [UIColor colorWithRed:0.2
-                                                      green:1.0
-                                                       blue:0.4
-                                                      alpha:1.0];
+        gLabel = [[UILabel alloc] initWithFrame:CGRectInset(gWin.bounds, 8, 6)];
+        gLabel.numberOfLines          = 0;
+        gLabel.font                   = [UIFont systemFontOfSize:10];
+        gLabel.textColor              = [UIColor colorWithRed:0.2
+                                                        green:1.0
+                                                         blue:0.4
+                                                        alpha:1.0];
         gLabel.userInteractionEnabled = NO;
-        gLabel.text = @"[LazadaFarm] chờ WebView...";
+        gLabel.text                   = @"[LazadaFarm] chờ WebView...";
         [gWin addSubview:gLabel];
 
         UIViewController *vc    = [UIViewController new];
@@ -46,19 +42,14 @@ static void updatePanel(NSString *text) {
     });
 }
 
-// Lắc máy để ẩn/hiện panel
+// ─── Shake để ẩn/hiện ────────────────────────────────────
 static void observeShake(void) {
-    // Hook sendEvent trên UIApplication
     Class cls = [UIApplication class];
-    SEL orig   = @selector(sendEvent:);
-    SEL swz    = @selector(lf_sendEvent:);
+    SEL orig  = @selector(sendEvent:);
 
     __block IMP origImp = NULL;
     IMP newImp = imp_implementationWithBlock(^(UIApplication *app, UIEvent *event) {
         if (event.type == UIEventTypeMotion) {
-            for (UIEventSubtype sub = 0; sub < 10; sub++) {
-                // subtype 1 = shake
-            }
             gVisible = !gVisible;
             dispatch_async(dispatch_get_main_queue(), ^{
                 gWin.hidden = !gVisible;
