@@ -5,29 +5,21 @@ workflows:
     environment:
       xcode: 16.4
     scripts:
-      - name: Install XcodeGen
-        script: brew install xcodegen
-      - name: Generate Xcode project
-        script: xcodegen generate
       - name: Build dylib
         script: |
-          set -o pipefail
-          xcodebuild \
-            -project LazadaFarm.xcodeproj \
-            -scheme LazadaFarm \
-            -configuration Release \
-            -sdk iphoneos \
-            -derivedDataPath build \
-            CODE_SIGNING_ALLOWED=NO \
-            CODE_SIGNING_REQUIRED=NO \
-            build 2>&1 | tee build_output.txt
-          if [ ${PIPESTATUS[0]} -ne 0 ]; then
-            grep -A 5 "error:" build_output.txt || tail -100 build_output.txt
-            exit 1
-          fi
-      - name: Copy dylib
-        script: |
-          mkdir -p output
-          cp build/Build/Products/Release-iphoneos/LazadaFarm.dylib output/lazada.dylib
+          set -e
+          xcrun -sdk iphoneos clang++ \
+            -arch arm64 \
+            -mios-version-min=16.0 \
+            -dynamiclib \
+            -fobjc-arc \
+            -framework Foundation \
+            -framework WebKit \
+            -framework UIKit \
+            -lobjc \
+            -install_name @rpath/lazada.dylib \
+            -o lazada.dylib \
+            LazadaFarm/Tweak.mm
+
     artifacts:
-      - output/lazada.dylib
+      - lazada.dylib
