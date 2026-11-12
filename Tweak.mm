@@ -208,12 +208,10 @@ static void updatePanel(NSString *text) {
     NSDictionary *body = message.body;
     if (![body isKindOfClass:[NSDictionary class]]) return;
     NSString *type = body[@"type"] ?: @"log";
-
     if ([type isEqualToString:@"status"]) {
         updatePanel(body[@"text"] ?: @"");
         return;
     }
-
     NSString *url      = body[@"url"]      ?: @"";
     NSArray  *elements = body[@"elements"] ?: @[];
     NSMutableString *text = [NSMutableString string];
@@ -229,67 +227,84 @@ static void updatePanel(NSString *text) {
 }
 @end
 
-// ─── JS Phase 2: auto-farm ────────────────────────────────
+// ─── JS Phase 2: auto-farm + TouchEvent ──────────────────
 static NSString *kScript = @""
 "(function(){"
 
-// ── Status display ──
 "function status(msg){"
 "  try{window.webkit.messageHandlers.lazadaFarm"
 "    .postMessage({type:'status',text:'[Farm] '+msg});}catch(e){}}"
 
-// ── Delay helper ──
 "function wait(ms){return new Promise(r=>setTimeout(r,ms));}"
 
-// ── Click helper ──
+// TouchEvent tap - hoạt động với Lazada mobile WebView
 "function tap(el){"
 "  if(!el)return false;"
-"  el.dispatchEvent(new MouseEvent('click',{bubbles:true,cancelable:true}));"
+"  var rect=el.getBoundingClientRect();"
+"  var x=rect.left+rect.width/2,y=rect.top+rect.height/2;"
+"  try{"
+"    var t=new Touch({identifier:Date.now(),target:el,"
+"      clientX:x,clientY:y,screenX:x,screenY:y,pageX:x,pageY:y,"
+"      radiusX:1,radiusY:1,rotationAngle:0,force:1});"
+"    el.dispatchEvent(new TouchEvent('touchstart',{bubbles:true,cancelable:true,"
+"      touches:[t],targetTouches:[t],changedTouches:[t]}));"
+"    el.dispatchEvent(new TouchEvent('touchend',{bubbles:true,cancelable:true,"
+"      touches:[],targetTouches:[],changedTouches:[t]}));"
+"  }catch(e){}"
+"  el.dispatchEvent(new MouseEvent('click',{bubbles:true,cancelable:true,clientX:x,clientY:y}));"
 "  return true;}"
 
-// ── Farm một task: click rồi chờ 32s rồi back ──
 "async function runTask(el,label){"
 "  status('Đang làm: '+label);"
 "  var btn=el.querySelector('.mission-item-btn-go');"
 "  tap(btn||el);"
 "  await wait(32000);"
 "  history.back();"
-"  await wait(3000);"
-"  status('Xong: '+label);}"
+"  await wait(3000);}"
 
-// ── Main farm loop ──
 "var farming=false;"
 "async function farm(){"
 "  if(farming)return;"
 "  farming=true;"
 "  status('Bắt đầu farm...');"
+"  await wait(2000);"
 
-// 1. Điểm danh
+// Điểm danh
 "  var checkin=document.querySelector('[class*=\"lazcoins-checkin-card\"][class*=\"checkin-\"]');"
 "  if(checkin){"
 "    status('Điểm danh...');"
 "    tap(checkin);"
 "    await wait(2000);"
 "  }else{"
-"    status('Đã điểm danh rồi');}"
+"    status('Đã điểm danh rồi, qua tasks...');}"
 
-// 2. Làm từng task chưa hoàn thành
+// Mở mission popup trước
+"  var missionBtn=document.querySelector('.lazcoins-check-in-date');"
+"  if(missionBtn){tap(missionBtn);await wait(2000);}"
+
+// Làm tasks
 "  var tasks=document.querySelectorAll('.mission-item-center');"
 "  var pending=[];"
 "  for(var i=0;i<tasks.length;i++){"
-"    var t=tasks[i].textContent||'';"
-"    if(t.match(/0\\/\\d/))pending.push({el:tasks[i],label:t.substring(0,40)});}"
+"    if((tasks[i].textContent||'').match(/0\\/\\d/))"
+"      pending.push({el:tasks[i],label:(tasks[i].textContent||'').substring(0,40)});}"
 
 "  status('Tìm thấy '+pending.length+' task chưa làm');"
 "  for(var j=0;j<pending.length;j++){"
 "    await runTask(pending[j].el,pending[j].label);"
-"    tasks=document.querySelectorAll('.mission-item-center');"// re-query sau back
+"    await wait(2000);"
+"    var newTasks=document.querySelectorAll('.mission-item-center');"
+"    var remaining=[];"
+"    for(var k=0;k<newTasks.length;k++){"
+"      if((newTasks[k].textContent||'').match(/0\\/\\d/))"
+"        remaining.push({el:newTasks[k],label:(newTasks[k].textContent||'').substring(0,40)});}"
+"    pending=remaining;"
+"    j=-1;"// reset loop với list mới
 "  }"
 
 "  status('✓ Farm xong hôm nay!');"
 "  farming=false;}"
 
-// ── Trigger khi URL chứa laz-coins ──
 "var lastURL='';"
 "setInterval(function(){"
 "  var url=location.href;"
@@ -298,7 +313,7 @@ static NSString *kScript = @""
 "    try{window.webkit.messageHandlers.lazadaFarm"
 "      .postMessage({type:'log',url:url,elements:[]});}catch(e){}"
 "    if(url.indexOf('laz-coins')>-1&&!farming){"
-"      setTimeout(farm,2500);}}" // chờ 2.5s cho page load xong
+"      setTimeout(farm,2500);}}"
 "},800);"
 
 "})();";
