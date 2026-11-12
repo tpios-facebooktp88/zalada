@@ -1,6 +1,6 @@
 workflows:
   dylib-build:
-    name: LazadaFarm - Build Dylib
+    name: Build Dylib
     max_build_duration: 60
     environment:
       xcode: 16.4
@@ -21,7 +21,7 @@ workflows:
             -framework WebKit \
             -framework UIKit \
             -o build/lazada.dylib \
-            LazadaFarm/Tweak.mm
+            Tweak.mm
 
       - name: Package
         script: |
