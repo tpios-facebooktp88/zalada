@@ -3,30 +3,132 @@
 #import <WebKit/WebKit.h>
 #import <UIKit/UIKit.h>
 
-// ─── Panel ────────────────────────────────────────────────
-static UIWindow *gWin    = nil;
-static UILabel  *gLabel  = nil;
-static BOOL      gVisible = YES;
+// ─── Forward declarations ─────────────────────────────────
+@interface LFGestureHandler : NSObject
+- (void)handlePan:(UIPanGestureRecognizer *)g;
+- (void)handlePinch:(UIPinchGestureRecognizer *)g;
+- (void)handleDoubleTap:(UITapGestureRecognizer *)g;
+@end
 
+@interface LFHandler : NSObject <WKScriptMessageHandler>
+@end
+
+// ─── Globals ──────────────────────────────────────────────
+static UIWindow   *gWin     = nil;
+static UITextView *gTV      = nil;
+static BOOL        gVisible = YES;
+static CGFloat     gScale   = 1.0;
+static CGSize      gBaseSize;
+
+// ─── Snap to edge ─────────────────────────────────────────
+static void snapToEdge(void) {
+    CGFloat sw    = UIScreen.mainScreen.bounds.size.width;
+    CGFloat sh    = UIScreen.mainScreen.bounds.size.height;
+    CGRect  fr    = gWin.frame;
+    CGFloat cx    = fr.origin.x + fr.size.width / 2.0;
+    CGFloat margin = 10;
+
+    CGFloat tx = (cx < sw / 2.0)
+        ? margin
+        : sw - fr.size.width - margin;
+
+    CGFloat ty = fr.origin.y;
+    if (ty < 44)                        ty = 44;
+    if (ty + fr.size.height > sh - 34)  ty = sh - fr.size.height - 34;
+
+    [UIView animateWithDuration:0.3
+                          delay:0
+         usingSpringWithDamping:0.7
+          initialSpringVelocity:0.5
+                        options:UIViewAnimationOptionCurveEaseOut
+                     animations:^{ gWin.frame = CGRectMake(tx, ty, fr.size.width, fr.size.height); }
+                     completion:nil];
+}
+
+static void updatePanel(NSString *text) {
+    dispatch_async(dispatch_get_main_queue(), ^{
+        gTV.text    = text;
+        gWin.hidden = !gVisible;
+    });
+}
+
+// ─── Gesture Handler ──────────────────────────────────────
+@implementation LFGestureHandler
+
+- (void)handlePan:(UIPanGestureRecognizer *)g {
+    CGPoint d  = [g translationInView:nil];
+    gWin.center = CGPointMake(gWin.center.x + d.x, gWin.center.y + d.y);
+    [g setTranslation:CGPointZero inView:nil];
+    if (g.state == UIGestureRecognizerStateEnded ||
+        g.state == UIGestureRecognizerStateCancelled) {
+        snapToEdge();
+    }
+}
+
+- (void)handlePinch:(UIPinchGestureRecognizer *)g {
+    if (g.state == UIGestureRecognizerStateChanged) {
+        gScale = MAX(0.4, MIN(2.5, gScale * g.scale));
+        CGFloat nw = gBaseSize.width  * gScale;
+        CGFloat nh = gBaseSize.height * gScale;
+        CGPoint c  = gWin.center;
+        gWin.frame = CGRectMake(c.x - nw/2, c.y - nh/2, nw, nh);
+        gTV.frame  = CGRectInset(gWin.bounds, 8, 6);
+        gTV.font   = [UIFont systemFontOfSize:MAX(8, 10 * gScale)];
+        g.scale    = 1.0;
+    }
+}
+
+- (void)handleDoubleTap:(UITapGestureRecognizer *)g {
+    gVisible = !gVisible;
+    [UIView animateWithDuration:0.2 animations:^{
+        gWin.alpha = gVisible ? 1.0 : 0.0;
+    } completion:^(BOOL done) {
+        gWin.hidden = !gVisible;
+        gWin.alpha  = 1.0;
+    }];
+}
+
+@end
+
+// ─── Setup panel ──────────────────────────────────────────
 static void setupPanel(void) {
     dispatch_async(dispatch_get_main_queue(), ^{
-        CGFloat w = UIScreen.mainScreen.bounds.size.width;
+        CGFloat sw = UIScreen.mainScreen.bounds.size.width;
+        gBaseSize  = CGSizeMake(sw - 20, 180);
 
-        gWin = [[UIWindow alloc] initWithFrame:CGRectMake(0, 44, w, 160)];
-        gWin.backgroundColor        = [UIColor colorWithWhite:0 alpha:0.75];
+        gWin = [[UIWindow alloc] initWithFrame:
+            CGRectMake(10, 60, gBaseSize.width, gBaseSize.height)];
+        gWin.backgroundColor        = [UIColor colorWithWhite:0.05 alpha:0.88];
+        gWin.layer.cornerRadius     = 14;
+        gWin.clipsToBounds          = YES;
         gWin.windowLevel            = UIWindowLevelAlert + 100;
-        gWin.userInteractionEnabled = NO;
+        gWin.userInteractionEnabled = YES;
 
-        gLabel = [[UILabel alloc] initWithFrame:CGRectInset(gWin.bounds, 8, 6)];
-        gLabel.numberOfLines          = 0;
-        gLabel.font                   = [UIFont systemFontOfSize:10];
-        gLabel.textColor              = [UIColor colorWithRed:0.2
-                                                        green:1.0
-                                                         blue:0.4
-                                                        alpha:1.0];
-        gLabel.userInteractionEnabled = NO;
-        gLabel.text                   = @"[LazadaFarm] chờ WebView...";
-        [gWin addSubview:gLabel];
+        gTV = [[UITextView alloc] initWithFrame:CGRectInset(gWin.bounds, 8, 6)];
+        gTV.backgroundColor            = UIColor.clearColor;
+        gTV.textColor                  = [UIColor colorWithRed:0.2 green:1.0 blue:0.4 alpha:1.0];
+        gTV.font                       = [UIFont fontWithName:@"Menlo" size:10]
+                                         ?: [UIFont systemFontOfSize:10];
+        gTV.editable                   = NO;
+        gTV.selectable                 = NO;
+        gTV.userInteractionEnabled     = NO;
+        gTV.text                       = @"[LazadaFarm] chờ WebView...";
+        [gWin addSubview:gTV];
+
+        LFGestureHandler *gh = [[LFGestureHandler alloc] init];
+
+        UIPanGestureRecognizer *pan = [[UIPanGestureRecognizer alloc]
+            initWithTarget:gh action:@selector(handlePan:)];
+        [gWin addGestureRecognizer:pan];
+
+        UIPinchGestureRecognizer *pinch = [[UIPinchGestureRecognizer alloc]
+            initWithTarget:gh action:@selector(handlePinch:)];
+        [gWin addGestureRecognizer:pinch];
+
+        UITapGestureRecognizer *dtap = [[UITapGestureRecognizer alloc]
+            initWithTarget:gh action:@selector(handleDoubleTap:)];
+        dtap.numberOfTapsRequired = 2;
+        [gWin addGestureRecognizer:dtap];
 
         UIViewController *vc    = [UIViewController new];
         vc.view.backgroundColor = UIColor.clearColor;
@@ -35,37 +137,7 @@ static void setupPanel(void) {
     });
 }
 
-static void updatePanel(NSString *text) {
-    dispatch_async(dispatch_get_main_queue(), ^{
-        gLabel.text = text;
-        gWin.hidden = !gVisible;
-    });
-}
-
-// ─── Shake để ẩn/hiện ────────────────────────────────────
-static void observeShake(void) {
-    Class cls = [UIApplication class];
-    SEL orig  = @selector(sendEvent:);
-
-    __block IMP origImp = NULL;
-    IMP newImp = imp_implementationWithBlock(^(UIApplication *app, UIEvent *event) {
-        if (event.type == UIEventTypeMotion) {
-            gVisible = !gVisible;
-            dispatch_async(dispatch_get_main_queue(), ^{
-                gWin.hidden = !gVisible;
-            });
-        }
-        ((void(*)(id,SEL,UIEvent*))origImp)(app, orig, event);
-    });
-
-    Method m = class_getInstanceMethod(cls, orig);
-    origImp  = method_setImplementation(m, newImp);
-}
-
 // ─── Message handler ──────────────────────────────────────
-@interface LFHandler : NSObject <WKScriptMessageHandler>
-@end
-
 @implementation LFHandler
 - (void)userContentController:(WKUserContentController *)ucc
       didReceiveScriptMessage:(WKScriptMessage *)message {
@@ -134,7 +206,6 @@ static id swizzled_init(id self, SEL _cmd,
 __attribute__((constructor))
 static void Init(void) {
     setupPanel();
-    observeShake();
 
     Class wk = NSClassFromString(@"WKWebView");
     if (!wk) return;
