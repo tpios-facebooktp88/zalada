@@ -4,35 +4,30 @@
 #import <UIKit/UIKit.h>
 
 // ─── Forward declarations ─────────────────────────────────
-@interface LFGestureHandler : NSObject
-- (void)handlePan:(UIPanGestureRecognizer *)g;
-- (void)handlePinch:(UIPinchGestureRecognizer *)g;
-- (void)handleDoubleTap:(UITapGestureRecognizer *)g;
-- (void)handleCopy;
-- (void)handleSearchChange;
-- (void)relayout;
+@interface LFPanel : UIView
 @end
-
 @interface LFHandler : NSObject <WKScriptMessageHandler>
 @end
 
 // ─── Globals ──────────────────────────────────────────────
-static UIWindow     *gWin      = nil;
-static UITextView   *gTV       = nil;
-static UITextField  *gSearch   = nil;
-static UIButton     *gCopyBtn  = nil;
-static UILabel      *gCopyFeed = nil;
-static BOOL          gVisible  = YES;
-static CGFloat       gScale    = 1.0;
-static CGSize        gBaseSize;
-static NSString     *gFullLog  = @"";
+static LFPanel  *gPanel   = nil;
+static UILabel  *gTV      = nil;
+static UITextField *gSearch = nil;
+static UIButton *gCopyBtn = nil;
+static UILabel  *gCopyFeed = nil;
+static NSString *gFullLog = @"";
+static BOOL      gVisible = YES;
+static CGFloat   gScale   = 1.0;
+static CGSize    gBaseSize;
 
 // ─── Helpers ──────────────────────────────────────────────
 static void snapToEdge(void) {
-    CGFloat sw = UIScreen.mainScreen.bounds.size.width;
-    CGFloat sh = UIScreen.mainScreen.bounds.size.height;
-    CGRect  fr = gWin.frame;
-    CGFloat cx = fr.origin.x + fr.size.width / 2.0;
+    UIView *parent = gPanel.superview;
+    if (!parent) return;
+    CGFloat sw = parent.bounds.size.width;
+    CGFloat sh = parent.bounds.size.height;
+    CGRect  fr = gPanel.frame;
+    CGFloat cx = CGRectGetMidX(fr);
     CGFloat tx = (cx < sw / 2.0) ? 10 : sw - fr.size.width - 10;
     CGFloat ty = fr.origin.y;
     if (ty < 60)                       ty = 60;
@@ -42,9 +37,27 @@ static void snapToEdge(void) {
          usingSpringWithDamping:0.7
           initialSpringVelocity:0.5
                         options:UIViewAnimationOptionCurveEaseOut
-                     animations:^{
-        gWin.frame = CGRectMake(tx, ty, fr.size.width, fr.size.height);
-    } completion:nil];
+                     animations:^{ gPanel.frame = CGRectMake(tx, ty, fr.size.width, fr.size.height); }
+                     completion:nil];
+}
+
+static void relayout(void) {
+    CGRect  b   = gPanel.bounds;
+    CGFloat sh  = 30;
+    CGFloat bh  = 36;
+    CGFloat gap = 4;
+    CGFloat top = sh + gap + 8;
+
+    gSearch.frame  = CGRectMake(8, 8, b.size.width - 16, sh);
+    gTV.frame      = CGRectMake(4, top, b.size.width - 8,
+                                b.size.height - top - bh - gap);
+    gTV.font       = [UIFont fontWithName:@"Menlo" size:MAX(8, 10 * gScale)]
+                     ?: [UIFont systemFontOfSize:MAX(8, 10 * gScale)];
+
+    CGFloat btnW   = 110;
+    CGFloat btnY   = b.size.height - bh + 4;
+    gCopyBtn.frame  = CGRectMake(b.size.width/2 - btnW/2, btnY, btnW, bh - 8);
+    gCopyFeed.frame = gCopyBtn.frame;
 }
 
 static void applyFilter(void) {
@@ -62,35 +75,121 @@ static void updatePanel(NSString *text) {
     dispatch_async(dispatch_get_main_queue(), ^{
         gFullLog = text;
         applyFilter();
-        gWin.hidden = !gVisible;
+        gPanel.hidden = !gVisible;
     });
 }
 
-// ─── Gesture Handler ──────────────────────────────────────
-@implementation LFGestureHandler
+// ─── Panel View ───────────────────────────────────────────
+@implementation LFPanel
 
-- (void)relayout {
-    CGRect  b   = gWin.bounds;
+- (instancetype)initWithFrame:(CGRect)frame {
+    self = [super initWithFrame:frame];
+    if (!self) return nil;
+
+    self.backgroundColor    = [UIColor colorWithWhite:0.05 alpha:0.90];
+    self.layer.cornerRadius = 14;
+    self.clipsToBounds      = YES;
+    self.layer.borderColor  = [UIColor colorWithWhite:0.3 alpha:0.5].CGColor;
+    self.layer.borderWidth  = 0.5;
+
+    // Search
+    gSearch = [[UITextField alloc] init];
+    gSearch.backgroundColor    = [UIColor colorWithWhite:0.18 alpha:1];
+    gSearch.textColor          = UIColor.whiteColor;
+    gSearch.font               = [UIFont systemFontOfSize:11];
+    gSearch.placeholder        = @"🔍 Filter...";
+    gSearch.layer.cornerRadius = 6;
+    gSearch.clipsToBounds      = YES;
+    UIView *pad = [[UIView alloc] initWithFrame:CGRectMake(0,0,8,0)];
+    gSearch.leftView     = pad;
+    gSearch.leftViewMode = UITextFieldViewModeAlways;
+    [gSearch addTarget:self action:@selector(searchChanged)
+      forControlEvents:UIControlEventEditingChanged];
+    [self addSubview:gSearch];
+
+    // Log label (scrollable via UIScrollView wrapper)
+    UIScrollView *scroll = [[UIScrollView alloc] init];
+    scroll.tag = 99;
+    [self addSubview:scroll];
+
+    gTV = [[UILabel alloc] init];
+    gTV.numberOfLines  = 0;
+    gTV.textColor      = [UIColor colorWithRed:0.2 green:1.0 blue:0.4 alpha:1.0];
+    gTV.font           = [UIFont fontWithName:@"Menlo" size:10]
+                         ?: [UIFont systemFontOfSize:10];
+    gTV.text           = @"[LazadaFarm] chờ WebView...";
+    [scroll addSubview:gTV];
+
+    // Copy button
+    gCopyBtn = [UIButton buttonWithType:UIButtonTypeSystem];
+    [gCopyBtn setTitle:@"📋 Copy Log" forState:UIControlStateNormal];
+    [gCopyBtn setTitleColor:[UIColor colorWithRed:0.2 green:1.0 blue:0.4 alpha:1.0]
+                   forState:UIControlStateNormal];
+    gCopyBtn.backgroundColor    = [UIColor colorWithWhite:0.15 alpha:1];
+    gCopyBtn.layer.cornerRadius = 8;
+    gCopyBtn.titleLabel.font    = [UIFont systemFontOfSize:12];
+    [gCopyBtn addTarget:self action:@selector(doCopy)
+       forControlEvents:UIControlEventTouchUpInside];
+    [self addSubview:gCopyBtn];
+
+    // Copy feedback
+    gCopyFeed = [[UILabel alloc] init];
+    gCopyFeed.textAlignment = NSTextAlignmentCenter;
+    gCopyFeed.textColor     = [UIColor colorWithRed:0.2 green:1.0 blue:0.4 alpha:1.0];
+    gCopyFeed.font          = [UIFont systemFontOfSize:12];
+    gCopyFeed.hidden        = YES;
+    gCopyFeed.text          = @"✓ Đã copy!";
+    [self addSubview:gCopyFeed];
+
+    // Pan gesture - 1 ngón kéo panel
+    UIPanGestureRecognizer *pan = [[UIPanGestureRecognizer alloc]
+        initWithTarget:self action:@selector(handlePan:)];
+    pan.minimumNumberOfTouches = 1;
+    pan.maximumNumberOfTouches = 1;
+    [self addGestureRecognizer:pan];
+
+    // Pinch
+    UIPinchGestureRecognizer *pinch = [[UIPinchGestureRecognizer alloc]
+        initWithTarget:self action:@selector(handlePinch:)];
+    [self addGestureRecognizer:pinch];
+
+    // Double tap ẩn/hiện
+    UITapGestureRecognizer *dtap = [[UITapGestureRecognizer alloc]
+        initWithTarget:self action:@selector(handleDoubleTap:)];
+    dtap.numberOfTapsRequired = 2;
+    [self addGestureRecognizer:dtap];
+
+    return self;
+}
+
+- (void)layoutSubviews {
+    [super layoutSubviews];
+    CGRect b    = self.bounds;
     CGFloat sh  = 30;
     CGFloat bh  = 36;
     CGFloat gap = 4;
     CGFloat top = sh + gap + 8;
     CGFloat tvH = b.size.height - top - bh - gap;
 
-    gSearch.frame  = CGRectMake(8, 8, b.size.width - 16, sh);
-    gTV.frame      = CGRectMake(0, top, b.size.width, tvH);
-    gTV.font       = [UIFont systemFontOfSize:MAX(8, 10 * gScale)];
+    gSearch.frame = CGRectMake(8, 8, b.size.width - 16, sh);
 
-    CGFloat btnW   = 100;
+    UIScrollView *scroll = (UIScrollView *)[self viewWithTag:99];
+    scroll.frame = CGRectMake(0, top, b.size.width, tvH);
+
+    CGSize fit = [gTV sizeThatFits:CGSizeMake(b.size.width - 8, CGFLOAT_MAX)];
+    gTV.frame  = CGRectMake(4, 0, b.size.width - 8, MAX(fit.height, tvH));
+    scroll.contentSize = CGSizeMake(b.size.width, MAX(fit.height, tvH));
+
+    CGFloat btnW   = 110;
     CGFloat btnY   = b.size.height - bh + 4;
     gCopyBtn.frame  = CGRectMake(b.size.width/2 - btnW/2, btnY, btnW, bh - 8);
-    gCopyFeed.frame = CGRectMake(0, btnY, b.size.width, bh - 8);
+    gCopyFeed.frame = gCopyBtn.frame;
 }
 
 - (void)handlePan:(UIPanGestureRecognizer *)g {
-    CGPoint d   = [g translationInView:nil];
-    gWin.center = CGPointMake(gWin.center.x + d.x, gWin.center.y + d.y);
-    [g setTranslation:CGPointZero inView:nil];
+    CGPoint d    = [g translationInView:self.superview];
+    self.center  = CGPointMake(self.center.x + d.x, self.center.y + d.y);
+    [g setTranslation:CGPointZero inView:self.superview];
     if (g.state == UIGestureRecognizerStateEnded ||
         g.state == UIGestureRecognizerStateCancelled) snapToEdge();
 }
@@ -100,28 +199,26 @@ static void updatePanel(NSString *text) {
         gScale     = MAX(0.4, MIN(2.5, gScale * g.scale));
         CGFloat nw = gBaseSize.width  * gScale;
         CGFloat nh = gBaseSize.height * gScale;
-        CGPoint c  = gWin.center;
-        gWin.frame = CGRectMake(c.x - nw/2, c.y - nh/2, nw, nh);
-        [self relayout];
-        g.scale = 1.0;
+        CGPoint c  = self.center;
+        self.frame = CGRectMake(c.x - nw/2, c.y - nh/2, nw, nh);
+        g.scale    = 1.0;
     }
 }
 
 - (void)handleDoubleTap:(UITapGestureRecognizer *)g {
     gVisible = !gVisible;
     [UIView animateWithDuration:0.2 animations:^{
-        gWin.alpha = gVisible ? 1.0 : 0.0;
+        self.alpha = gVisible ? 1.0 : 0.0;
     } completion:^(BOOL f) {
-        gWin.hidden = !gVisible;
-        gWin.alpha  = 1.0;
+        self.hidden = !gVisible;
+        self.alpha  = 1.0;
     }];
 }
 
-- (void)handleCopy {
+- (void)doCopy {
     [UIPasteboard generalPasteboard].string = gTV.text ?: @"";
     gCopyBtn.hidden  = YES;
     gCopyFeed.hidden = NO;
-    gCopyFeed.text   = @"✓ Đã copy!";
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.5 * NSEC_PER_SEC)),
                    dispatch_get_main_queue(), ^{
         gCopyBtn.hidden  = NO;
@@ -129,114 +226,41 @@ static void updatePanel(NSString *text) {
     });
 }
 
-- (void)handleSearchChange {
+- (void)searchChanged {
     applyFilter();
+    // resize label sau filter
+    [self setNeedsLayout];
+    [self layoutIfNeeded];
+}
+
+// Cho touch đi qua vùng trong suốt
+- (UIView *)hitTest:(CGPoint)point withEvent:(UIEvent *)event {
+    UIView *hit = [super hitTest:point withEvent:event];
+    // Nếu hit là chính panel (không phải subview) → pass through
+    return (hit == self) ? nil : hit;
 }
 
 @end
 
-// ─── Setup panel ──────────────────────────────────────────
+// ─── Inject panel vào keyWindow ───────────────────────────
 static void setupPanel(void) {
     dispatch_async(dispatch_get_main_queue(), ^{
-        CGFloat sw = UIScreen.mainScreen.bounds.size.width;
+        UIWindow *kw = nil;
+        for (UIWindow *w in UIApplication.sharedApplication.windows) {
+            if (w.isKeyWindow) { kw = w; break; }
+        }
+        if (!kw) kw = UIApplication.sharedApplication.windows.firstObject;
+        if (!kw) return;
+
+        CGFloat sw = kw.bounds.size.width;
         gBaseSize  = CGSizeMake(sw - 20, 220);
 
-        // Lấy active scene - iOS 16 bắt buộc
-        UIWindowScene *scene = nil;
-        for (UIScene *s in UIApplication.sharedApplication.connectedScenes) {
-            if ([s isKindOfClass:[UIWindowScene class]] &&
-                s.activationState == UISceneActivationStateForegroundActive) {
-                scene = (UIWindowScene *)s;
-                break;
-            }
-        }
+        gPanel = [[LFPanel alloc] initWithFrame:
+            CGRectMake(10, 60, gBaseSize.width, gBaseSize.height)];
 
-        if (scene) {
-            gWin = [[UIWindow alloc] initWithWindowScene:scene];
-        } else {
-            gWin = [[UIWindow alloc] initWithFrame:CGRectZero];
-        }
-        gWin.frame              = CGRectMake(10, 60, gBaseSize.width, gBaseSize.height);
-        gWin.backgroundColor    = [UIColor colorWithWhite:0.05 alpha:0.90];
-        gWin.layer.cornerRadius = 14;
-        gWin.clipsToBounds      = YES;
-        gWin.windowLevel        = UIWindowLevelAlert + 100;
-
-        // Search
-        gSearch = [[UITextField alloc] init];
-        gSearch.backgroundColor    = [UIColor colorWithWhite:0.18 alpha:1];
-        gSearch.textColor          = UIColor.whiteColor;
-        gSearch.font               = [UIFont systemFontOfSize:11];
-        gSearch.placeholder        = @"🔍 Filter...";
-        gSearch.layer.cornerRadius = 6;
-        gSearch.clipsToBounds      = YES;
-        UIView *pad = [[UIView alloc] initWithFrame:CGRectMake(0,0,8,0)];
-        gSearch.leftView     = pad;
-        gSearch.leftViewMode = UITextFieldViewModeAlways;
-        [gWin addSubview:gSearch];
-
-        // Log text view
-        gTV = [[UITextView alloc] init];
-        gTV.backgroundColor    = UIColor.clearColor;
-        gTV.textColor          = [UIColor colorWithRed:0.2 green:1.0 blue:0.4 alpha:1.0];
-        gTV.font               = [UIFont fontWithName:@"Menlo" size:10]
-                                 ?: [UIFont systemFontOfSize:10];
-        gTV.editable           = NO;
-        gTV.selectable         = NO;
-        gTV.text               = @"[LazadaFarm] chờ WebView...";
-        [gWin addSubview:gTV];
-
-        // Copy button
-        gCopyBtn = [UIButton buttonWithType:UIButtonTypeSystem];
-        [gCopyBtn setTitle:@"📋 Copy Log" forState:UIControlStateNormal];
-        [gCopyBtn setTitleColor:[UIColor colorWithRed:0.2 green:1.0 blue:0.4 alpha:1.0]
-                       forState:UIControlStateNormal];
-        gCopyBtn.backgroundColor    = [UIColor colorWithWhite:0.15 alpha:1];
-        gCopyBtn.layer.cornerRadius = 8;
-        gCopyBtn.titleLabel.font    = [UIFont systemFontOfSize:12];
-        [gWin addSubview:gCopyBtn];
-
-        // Copy feedback
-        gCopyFeed = [[UILabel alloc] init];
-        gCopyFeed.textAlignment = NSTextAlignmentCenter;
-        gCopyFeed.textColor     = [UIColor colorWithRed:0.2 green:1.0 blue:0.4 alpha:1.0];
-        gCopyFeed.font          = [UIFont systemFontOfSize:12];
-        gCopyFeed.hidden        = YES;
-        [gWin addSubview:gCopyFeed];
-
-        LFGestureHandler *gh = [[LFGestureHandler alloc] init];
-
-        [gCopyBtn addTarget:gh
-                     action:@selector(handleCopy)
-           forControlEvents:UIControlEventTouchUpInside];
-        [gSearch addTarget:gh
-                    action:@selector(handleSearchChange)
-          forControlEvents:UIControlEventEditingChanged];
-
-        // 2 ngón kéo panel
-        UIPanGestureRecognizer *pan = [[UIPanGestureRecognizer alloc]
-            initWithTarget:gh action:@selector(handlePan:)];
-        pan.minimumNumberOfTouches = 2;
-        pan.maximumNumberOfTouches = 2;
-        [gWin addGestureRecognizer:pan];
-
-        UIPinchGestureRecognizer *pinch = [[UIPinchGestureRecognizer alloc]
-            initWithTarget:gh action:@selector(handlePinch:)];
-        [gWin addGestureRecognizer:pinch];
-
-        UITapGestureRecognizer *dtap = [[UITapGestureRecognizer alloc]
-            initWithTarget:gh action:@selector(handleDoubleTap:)];
-        dtap.numberOfTapsRequired = 2;
-        [gWin addGestureRecognizer:dtap];
-
-        [gh relayout];
-
-        UIViewController *vc    = [UIViewController new];
-        vc.view.backgroundColor = UIColor.clearColor;
-        gWin.rootViewController = vc;
-
-        // makeKeyAndVisible để nhận touch
-        [gWin makeKeyAndVisible];
+        // Thêm vào keyWindow ở layer cao nhất
+        [kw addSubview:gPanel];
+        [kw bringSubviewToFront:gPanel];
     });
 }
 
@@ -258,6 +282,11 @@ static void setupPanel(void) {
         [text appendString:@"Chưa thấy element xu/checkin"];
     }
     updatePanel(text);
+    // resize sau update
+    dispatch_async(dispatch_get_main_queue(), ^{
+        [gPanel setNeedsLayout];
+        [gPanel layoutIfNeeded];
+    });
 }
 @end
 
