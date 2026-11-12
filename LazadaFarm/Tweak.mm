@@ -3,24 +3,21 @@
 #import <WebKit/WebKit.h>
 #import <UIKit/UIKit.h>
 
-// ─── Forward declarations ─────────────────────────────────
 @interface LFPanel : UIView
 @end
 @interface LFHandler : NSObject <WKScriptMessageHandler>
 @end
 
-// ─── Globals ──────────────────────────────────────────────
-static LFPanel  *gPanel   = nil;
-static UILabel  *gTV      = nil;
-static UITextField *gSearch = nil;
-static UIButton *gCopyBtn = nil;
-static UILabel  *gCopyFeed = nil;
-static NSString *gFullLog = @"";
-static BOOL      gVisible = YES;
-static CGFloat   gScale   = 1.0;
-static CGSize    gBaseSize;
+static LFPanel     *gPanel    = nil;
+static UILabel     *gTV       = nil;
+static UITextField *gSearch   = nil;
+static UIButton    *gCopyBtn  = nil;
+static UILabel     *gCopyFeed = nil;
+static NSString    *gFullLog  = @"";
+static BOOL         gVisible  = YES;
+static CGFloat      gScale    = 1.0;
+static CGSize       gBaseSize;
 
-// ─── Helpers ──────────────────────────────────────────────
 static void snapToEdge(void) {
     UIView *parent = gPanel.superview;
     if (!parent) return;
@@ -41,25 +38,6 @@ static void snapToEdge(void) {
                      completion:nil];
 }
 
-static void relayout(void) {
-    CGRect  b   = gPanel.bounds;
-    CGFloat sh  = 30;
-    CGFloat bh  = 36;
-    CGFloat gap = 4;
-    CGFloat top = sh + gap + 8;
-
-    gSearch.frame  = CGRectMake(8, 8, b.size.width - 16, sh);
-    gTV.frame      = CGRectMake(4, top, b.size.width - 8,
-                                b.size.height - top - bh - gap);
-    gTV.font       = [UIFont fontWithName:@"Menlo" size:MAX(8, 10 * gScale)]
-                     ?: [UIFont systemFontOfSize:MAX(8, 10 * gScale)];
-
-    CGFloat btnW   = 110;
-    CGFloat btnY   = b.size.height - bh + 4;
-    gCopyBtn.frame  = CGRectMake(b.size.width/2 - btnW/2, btnY, btnW, bh - 8);
-    gCopyFeed.frame = gCopyBtn.frame;
-}
-
 static void applyFilter(void) {
     NSString *kw = gSearch.text ?: @"";
     if (kw.length == 0) { gTV.text = gFullLog; return; }
@@ -74,12 +52,13 @@ static void applyFilter(void) {
 static void updatePanel(NSString *text) {
     dispatch_async(dispatch_get_main_queue(), ^{
         gFullLog = text;
-        applyFilter();
-        gPanel.hidden = !gVisible;
+        if (gVisible) applyFilter();
+        gPanel.hidden = NO;
+        [gPanel setNeedsLayout];
+        [gPanel layoutIfNeeded];
     });
 }
 
-// ─── Panel View ───────────────────────────────────────────
 @implementation LFPanel
 
 - (instancetype)initWithFrame:(CGRect)frame {
@@ -92,7 +71,6 @@ static void updatePanel(NSString *text) {
     self.layer.borderColor  = [UIColor colorWithWhite:0.3 alpha:0.5].CGColor;
     self.layer.borderWidth  = 0.5;
 
-    // Search
     gSearch = [[UITextField alloc] init];
     gSearch.backgroundColor    = [UIColor colorWithWhite:0.18 alpha:1];
     gSearch.textColor          = UIColor.whiteColor;
@@ -107,20 +85,18 @@ static void updatePanel(NSString *text) {
       forControlEvents:UIControlEventEditingChanged];
     [self addSubview:gSearch];
 
-    // Log label (scrollable via UIScrollView wrapper)
     UIScrollView *scroll = [[UIScrollView alloc] init];
     scroll.tag = 99;
     [self addSubview:scroll];
 
     gTV = [[UILabel alloc] init];
-    gTV.numberOfLines  = 0;
-    gTV.textColor      = [UIColor colorWithRed:0.2 green:1.0 blue:0.4 alpha:1.0];
-    gTV.font           = [UIFont fontWithName:@"Menlo" size:10]
-                         ?: [UIFont systemFontOfSize:10];
-    gTV.text           = @"[LazadaFarm] chờ WebView...";
+    gTV.numberOfLines = 0;
+    gTV.textColor     = [UIColor colorWithRed:0.2 green:1.0 blue:0.4 alpha:1.0];
+    gTV.font          = [UIFont fontWithName:@"Menlo" size:10]
+                        ?: [UIFont systemFontOfSize:10];
+    gTV.text          = @"[LazadaFarm] chờ WebView...";
     [scroll addSubview:gTV];
 
-    // Copy button
     gCopyBtn = [UIButton buttonWithType:UIButtonTypeSystem];
     [gCopyBtn setTitle:@"📋 Copy Log" forState:UIControlStateNormal];
     [gCopyBtn setTitleColor:[UIColor colorWithRed:0.2 green:1.0 blue:0.4 alpha:1.0]
@@ -132,7 +108,6 @@ static void updatePanel(NSString *text) {
        forControlEvents:UIControlEventTouchUpInside];
     [self addSubview:gCopyBtn];
 
-    // Copy feedback
     gCopyFeed = [[UILabel alloc] init];
     gCopyFeed.textAlignment = NSTextAlignmentCenter;
     gCopyFeed.textColor     = [UIColor colorWithRed:0.2 green:1.0 blue:0.4 alpha:1.0];
@@ -141,19 +116,16 @@ static void updatePanel(NSString *text) {
     gCopyFeed.text          = @"✓ Đã copy!";
     [self addSubview:gCopyFeed];
 
-    // Pan gesture - 1 ngón kéo panel
     UIPanGestureRecognizer *pan = [[UIPanGestureRecognizer alloc]
         initWithTarget:self action:@selector(handlePan:)];
     pan.minimumNumberOfTouches = 1;
     pan.maximumNumberOfTouches = 1;
     [self addGestureRecognizer:pan];
 
-    // Pinch
     UIPinchGestureRecognizer *pinch = [[UIPinchGestureRecognizer alloc]
         initWithTarget:self action:@selector(handlePinch:)];
     [self addGestureRecognizer:pinch];
 
-    // Double tap ẩn/hiện
     UITapGestureRecognizer *dtap = [[UITapGestureRecognizer alloc]
         initWithTarget:self action:@selector(handleDoubleTap:)];
     dtap.numberOfTapsRequired = 2;
@@ -164,7 +136,8 @@ static void updatePanel(NSString *text) {
 
 - (void)layoutSubviews {
     [super layoutSubviews];
-    CGRect b    = self.bounds;
+    if (!gVisible) return;
+    CGRect  b   = self.bounds;
     CGFloat sh  = 30;
     CGFloat bh  = 36;
     CGFloat gap = 4;
@@ -180,21 +153,22 @@ static void updatePanel(NSString *text) {
     gTV.frame  = CGRectMake(4, 0, b.size.width - 8, MAX(fit.height, tvH));
     scroll.contentSize = CGSizeMake(b.size.width, MAX(fit.height, tvH));
 
-    CGFloat btnW   = 110;
-    CGFloat btnY   = b.size.height - bh + 4;
+    CGFloat btnW = 110;
+    CGFloat btnY = b.size.height - bh + 4;
     gCopyBtn.frame  = CGRectMake(b.size.width/2 - btnW/2, btnY, btnW, bh - 8);
     gCopyFeed.frame = gCopyBtn.frame;
 }
 
 - (void)handlePan:(UIPanGestureRecognizer *)g {
-    CGPoint d    = [g translationInView:self.superview];
-    self.center  = CGPointMake(self.center.x + d.x, self.center.y + d.y);
+    CGPoint d   = [g translationInView:self.superview];
+    self.center = CGPointMake(self.center.x + d.x, self.center.y + d.y);
     [g setTranslation:CGPointZero inView:self.superview];
     if (g.state == UIGestureRecognizerStateEnded ||
         g.state == UIGestureRecognizerStateCancelled) snapToEdge();
 }
 
 - (void)handlePinch:(UIPinchGestureRecognizer *)g {
+    if (!gVisible) return;
     if (g.state == UIGestureRecognizerStateChanged) {
         gScale     = MAX(0.4, MIN(2.5, gScale * g.scale));
         CGFloat nw = gBaseSize.width  * gScale;
@@ -207,12 +181,39 @@ static void updatePanel(NSString *text) {
 
 - (void)handleDoubleTap:(UITapGestureRecognizer *)g {
     gVisible = !gVisible;
-    [UIView animateWithDuration:0.2 animations:^{
-        self.alpha = gVisible ? 1.0 : 0.0;
-    } completion:^(BOOL f) {
-        self.hidden = !gVisible;
-        self.alpha  = 1.0;
-    }];
+    UIView *parent = self.superview;
+    CGFloat sw = parent ? parent.bounds.size.width : 390;
+
+    if (!gVisible) {
+        // Thu nhỏ thành nút tròn góc phải
+        [UIView animateWithDuration:0.25 animations:^{
+            self.frame              = CGRectMake(sw - 54, 80, 44, 44);
+            self.layer.cornerRadius = 22;
+            gSearch.alpha           = 0;
+            gCopyBtn.alpha          = 0;
+            gCopyFeed.alpha         = 0;
+            UIScrollView *s = (UIScrollView *)[self viewWithTag:99];
+            s.alpha = 0;
+        }];
+    } else {
+        // Mở lại full size
+        gSearch.alpha   = 1;
+        gCopyBtn.alpha  = 1;
+        gCopyFeed.alpha = 1;
+        UIScrollView *s = (UIScrollView *)[self viewWithTag:99];
+        s.alpha = 1;
+        applyFilter();
+        [UIView animateWithDuration:0.3
+                         animations:^{
+            self.frame              = CGRectMake(10, 60,
+                                        gBaseSize.width  * gScale,
+                                        gBaseSize.height * gScale);
+            self.layer.cornerRadius = 14;
+        } completion:^(BOOL f) {
+            [self setNeedsLayout];
+            [self layoutIfNeeded];
+        }];
+    }
 }
 
 - (void)doCopy {
@@ -228,41 +229,17 @@ static void updatePanel(NSString *text) {
 
 - (void)searchChanged {
     applyFilter();
-    // resize label sau filter
     [self setNeedsLayout];
     [self layoutIfNeeded];
 }
 
-// Cho touch đi qua vùng trong suốt
 - (UIView *)hitTest:(CGPoint)point withEvent:(UIEvent *)event {
     UIView *hit = [super hitTest:point withEvent:event];
-    // Nếu hit là chính panel (không phải subview) → pass through
-    return (hit == self) ? nil : hit;
+    if (!gVisible) return hit; // nút tròn nhận tap để mở lại
+    return (hit == self) ? nil : hit; // vùng trong suốt pass through
 }
 
 @end
-
-// ─── Inject panel vào keyWindow ───────────────────────────
-static void setupPanel(void) {
-    dispatch_async(dispatch_get_main_queue(), ^{
-        UIWindow *kw = nil;
-        for (UIWindow *w in UIApplication.sharedApplication.windows) {
-            if (w.isKeyWindow) { kw = w; break; }
-        }
-        if (!kw) kw = UIApplication.sharedApplication.windows.firstObject;
-        if (!kw) return;
-
-        CGFloat sw = kw.bounds.size.width;
-        gBaseSize  = CGSizeMake(sw - 20, 220);
-
-        gPanel = [[LFPanel alloc] initWithFrame:
-            CGRectMake(10, 60, gBaseSize.width, gBaseSize.height)];
-
-        // Thêm vào keyWindow ở layer cao nhất
-        [kw addSubview:gPanel];
-        [kw bringSubviewToFront:gPanel];
-    });
-}
 
 // ─── Message handler ──────────────────────────────────────
 @implementation LFHandler
@@ -282,11 +259,6 @@ static void setupPanel(void) {
         [text appendString:@"Chưa thấy element xu/checkin"];
     }
     updatePanel(text);
-    // resize sau update
-    dispatch_async(dispatch_get_main_queue(), ^{
-        [gPanel setNeedsLayout];
-        [gPanel layoutIfNeeded];
-    });
 }
 @end
 
@@ -330,6 +302,26 @@ static id swizzled_init(id self, SEL _cmd,
                            name:@"lazadaFarm"];
     return ((id(*)(id,SEL,CGRect,WKWebViewConfiguration*))gOrigInit)
         (self, _cmd, frame, cfg);
+}
+
+// ─── Setup panel ──────────────────────────────────────────
+static void setupPanel(void) {
+    dispatch_async(dispatch_get_main_queue(), ^{
+        UIWindow *kw = nil;
+        for (UIWindow *w in UIApplication.sharedApplication.windows) {
+            if (w.isKeyWindow) { kw = w; break; }
+        }
+        if (!kw) kw = UIApplication.sharedApplication.windows.firstObject;
+        if (!kw) return;
+
+        CGFloat sw = kw.bounds.size.width;
+        gBaseSize  = CGSizeMake(sw - 20, 220);
+
+        gPanel = [[LFPanel alloc] initWithFrame:
+            CGRectMake(10, 60, gBaseSize.width, gBaseSize.height)];
+        [kw addSubview:gPanel];
+        [kw bringSubviewToFront:gPanel];
+    });
 }
 
 // ─── Constructor ──────────────────────────────────────────
