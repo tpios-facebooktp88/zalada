@@ -2,34 +2,158 @@
 #import <objc/runtime.h>
 #import <WebKit/WebKit.h>
 #import <UIKit/UIKit.h>
+#import <CoreGraphics/CoreGraphics.h>
 
+// ─── IOHIDEvent private API ───────────────────────────────
+typedef struct __IOHIDEvent *IOHIDEventRef;
+typedef struct __IOHIDEventSystemClient *IOHIDEventSystemClientRef;
+
+extern IOHIDEventSystemClientRef IOHIDEventSystemClientCreate(CFAllocatorRef allocator);
+extern void IOHIDEventSystemClientDispatchEvent(IOHIDEventSystemClientRef client, IOHIDEventRef event);
+extern IOHIDEventRef IOHIDEventCreateDigitizerEvent(CFAllocatorRef, uint64_t, uint32_t, uint32_t, uint32_t, uint64_t, double, double, double, double, double, uint32_t, bool, bool, uint32_t);
+extern IOHIDEventRef IOHIDEventCreateDigitizerFingerEvent(CFAllocatorRef, uint64_t, uint32_t, uint32_t, uint32_t, double, double, double, double, double, uint32_t, bool, bool, uint32_t);
+extern void IOHIDEventAppendEvent(IOHIDEventRef parent, IOHIDEventRef child, uint32_t);
+extern void IOHIDEventSetSenderID(IOHIDEventRef, uint64_t);
+extern void IOHIDEventSetIntegerValue(IOHIDEventRef, uint32_t, int32_t);
+extern void IOHIDEventSetFloatValue(IOHIDEventRef, uint32_t, double);
+
+// kIOHIDEventFieldDigitizerIsDisplayIntegrated = 0x000D0019
+// kIOHIDEventFieldDigitizerType = 0x000D0001
+#define kIOHIDEventFieldDigitizerIsDisplayIntegrated 0x000D0019
+#define kIOHIDDigitizerEventTouch   (1 << 0)
+#define kIOHIDDigitizerEventRange   (1 << 1)
+#define kIOHIDTransducerTypeHand    4
+#define kIOHIDTransducerIndexFinger 1
+
+// ─── IOHIDEvent tap ───────────────────────────────────────
+static IOHIDEventSystemClientRef gHIDClient = NULL;
+
+static void hidTap(CGPoint point) {
+    if (!gHIDClient) {
+        gHIDClient = IOHIDEventSystemClientCreate(kCFAllocatorDefault);
+    }
+    if (!gHIDClient) return;
+
+    uint64_t ts = (uint64_t)(CACurrentMediaTime() * 1e9);
+    double x = point.x, y = point.y;
+
+    // touchstart
+    IOHIDEventRef parent = IOHIDEventCreateDigitizerEvent(
+        kCFAllocatorDefault, ts,
+        kIOHIDTransducerTypeHand, 0, 1,
+        0, x, y, 0, 1.0, 0,
+        kIOHIDDigitizerEventTouch | kIOHIDDigitizerEventRange,
+        true, true, 0);
+
+    IOHIDEventRef finger = IOHIDEventCreateDigitizerFingerEvent(
+        kCFAllocatorDefault, ts,
+        kIOHIDTransducerIndexFinger, 2, 1,
+        x, y, 0, 1.0, 0,
+        kIOHIDDigitizerEventTouch | kIOHIDDigitizerEventRange,
+        true, true, 0);
+
+    IOHIDEventSetIntegerValue(parent, kIOHIDEventFieldDigitizerIsDisplayIntegrated, 1);
+    IOHIDEventSetIntegerValue(finger, kIOHIDEventFieldDigitizerIsDisplayIntegrated, 1);
+    IOHIDEventAppendEvent(parent, finger, 0);
+    IOHIDEventSystemClientDispatchEvent(gHIDClient, parent);
+    CFRelease(finger);
+    CFRelease(parent);
+
+    // touchend sau 80ms
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(80 * NSEC_PER_MSEC)),
+                   dispatch_get_main_queue(), ^{
+        uint64_t ts2 = (uint64_t)(CACurrentMediaTime() * 1e9);
+
+        IOHIDEventRef parent2 = IOHIDEventCreateDigitizerEvent(
+            kCFAllocatorDefault, ts2,
+            kIOHIDTransducerTypeHand, 0, 1,
+            0, x, y, 0, 0, 0,
+            kIOHIDDigitizerEventTouch | kIOHIDDigitizerEventRange,
+            false, false, 0);
+
+        IOHIDEventRef finger2 = IOHIDEventCreateDigitizerFingerEvent(
+            kCFAllocatorDefault, ts2,
+            kIOHIDTransducerIndexFinger, 2, 1,
+            x, y, 0, 0, 0,
+            kIOHIDDigitizerEventTouch | kIOHIDDigitizerEventRange,
+            false, false, 0);
+
+        IOHIDEventSetIntegerValue(parent2, kIOHIDEventFieldDigitizerIsDisplayIntegrated, 1);
+        IOHIDEventSetIntegerValue(finger2, kIOHIDEventFieldDigitizerIsDisplayIntegrated, 1);
+        IOHIDEventAppendEvent(parent2, finger2, 0);
+        IOHIDEventSystemClientDispatchEvent(gHIDClient, parent2);
+        CFRelease(finger2);
+        CFRelease(parent2);
+    });
+}
+
+// ─── Tap element trong WKWebView bằng IOHIDEvent ──────────
+// Lấy CGPoint từ JS getBoundingClientRect rồi convert sang screen coords
+static void tapElementInWebView(WKWebView *wv, NSString *jsSelector, void(^completion)(BOOL)) {
+    NSString *js = [NSString stringWithFormat:
+        @"(function(){"
+         "var el=document.querySelector('%@');"
+         "if(!el)return null;"
+         "var r=el.getBoundingClientRect();"
+         "return JSON.stringify({x:r.left+r.width/2,y:r.top+r.height/2});"
+         "})()", jsSelector];
+
+    [wv evaluateJavaScript:js completionHandler:^(id result, NSError *err) {
+        if (!result || [result isKindOfClass:[NSNull class]]) {
+            if (completion) completion(NO);
+            return;
+        }
+        NSData *data = [result dataUsingEncoding:NSUTF8StringEncoding];
+        NSDictionary *pt = [NSJSONSerialization JSONObjectWithData:data options:0 error:nil];
+        if (!pt) { if (completion) completion(NO); return; }
+
+        // Convert WebView-relative coords → screen coords
+        CGFloat wx = [pt[@"x"] doubleValue];
+        CGFloat wy = [pt[@"y"] doubleValue];
+
+        // WKWebView frame trên screen
+        CGPoint webOrigin = [wv convertPoint:CGPointZero toView:nil];
+        // Thêm status bar offset nếu cần
+        CGFloat scale = UIScreen.mainScreen.scale;
+        CGPoint screenPt = CGPointMake((webOrigin.x + wx), (webOrigin.y + wy));
+
+        // HIDEvent dùng screen coords nhân scale
+        CGPoint hidPt = CGPointMake(screenPt.x * scale, screenPt.y * scale);
+        hidTap(hidPt);
+        if (completion) completion(YES);
+    }];
+}
+
+// ─── Panel ────────────────────────────────────────────────
 @interface LFPanel : UIView
 @end
 @interface LFHandler : NSObject <WKScriptMessageHandler>
 @end
 
-static LFPanel     *gPanel    = nil;
-static UILabel     *gTV       = nil;
-static UITextField *gSearch   = nil;
-static UIButton    *gCopyBtn  = nil;
-static UIButton    *gStartBtn = nil;
-static UILabel     *gCopyFeed = nil;
-static NSString    *gFullLog  = @"";
-static BOOL         gVisible  = YES;
-static CGFloat      gScale    = 1.0;
-static CGSize       gBaseSize;
+static LFPanel      *gPanel    = nil;
+static UILabel      *gTV       = nil;
+static UITextField  *gSearch   = nil;
+static UIButton     *gCopyBtn  = nil;
+static UIButton     *gStartBtn = nil;
+static UILabel      *gCopyFeed = nil;
+static NSString     *gFullLog  = @"";
+static BOOL          gVisible  = YES;
+static CGFloat       gScale    = 1.0;
+static CGSize        gBaseSize;
+static WKWebView    *gActiveWebView = nil; // track webview đang farm
+static BOOL          gFarmEnabled  = NO;
 
 static void snapToEdge(void) {
-    UIView *p = gPanel.superview; if (!p) return;
-    CGRect fr = gPanel.frame;
-    CGFloat tx = (CGRectGetMidX(fr)<p.bounds.size.width/2.0)?10:p.bounds.size.width-fr.size.width-10;
-    CGFloat ty = MAX(60,MIN(fr.origin.y,p.bounds.size.height-fr.size.height-34));
+    UIView *p=gPanel.superview;if(!p)return;
+    CGRect fr=gPanel.frame;
+    CGFloat tx=(CGRectGetMidX(fr)<p.bounds.size.width/2.0)?10:p.bounds.size.width-fr.size.width-10;
+    CGFloat ty=MAX(60,MIN(fr.origin.y,p.bounds.size.height-fr.size.height-34));
     [UIView animateWithDuration:0.3 delay:0 usingSpringWithDamping:0.7 initialSpringVelocity:0.5
                         options:UIViewAnimationOptionCurveEaseOut
                      animations:^{gPanel.frame=CGRectMake(tx,ty,fr.size.width,fr.size.height);}completion:nil];
 }
 
-static void applyFilter(void) {
+static void applyFilter(void){
     NSString *kw=gSearch.text?:@"";
     if(!kw.length){gTV.text=gFullLog;return;}
     NSMutableString *out=[NSMutableString string];
@@ -38,33 +162,29 @@ static void applyFilter(void) {
     gTV.text=out.length?out:@"Không tìm thấy";
 }
 
-static void updatePanel(NSString *text) {
+static void updatePanel(NSString *text){
     dispatch_async(dispatch_get_main_queue(),^{
-        gFullLog=text;
-        if(gVisible)applyFilter();
-        gPanel.hidden=NO;
-        [gPanel setNeedsLayout];[gPanel layoutIfNeeded];
+        gFullLog=text;if(gVisible)applyFilter();
+        gPanel.hidden=NO;[gPanel setNeedsLayout];[gPanel layoutIfNeeded];
     });
 }
 
-static void updateStartBtn(BOOL running) {
+static void updateStartBtn(BOOL running){
     dispatch_async(dispatch_get_main_queue(),^{
-        NSString *title = running ? @"⏹ Dừng" : @"▶ Bắt đầu";
-        UIColor *color = running
-            ? [UIColor colorWithRed:1.0 green:0.3 blue:0.3 alpha:1.0]
-            : [UIColor colorWithRed:0.2 green:1.0 blue:0.4 alpha:1.0];
+        NSString *title=running?@"⏹ Dừng":@"▶ Bắt đầu";
+        UIColor *color=running?[UIColor colorWithRed:1.0 green:0.3 blue:0.3 alpha:1.0]
+                              :[UIColor colorWithRed:0.2 green:1.0 blue:0.4 alpha:1.0];
         [gStartBtn setTitle:title forState:UIControlStateNormal];
         [gStartBtn setTitleColor:color forState:UIControlStateNormal];
     });
 }
 
 @implementation LFPanel
-- (instancetype)initWithFrame:(CGRect)frame {
+-(instancetype)initWithFrame:(CGRect)frame{
     self=[super initWithFrame:frame];if(!self)return nil;
     self.backgroundColor=[UIColor colorWithWhite:0.05 alpha:0.90];
     self.layer.cornerRadius=14;self.clipsToBounds=YES;
-    self.layer.borderColor=[UIColor colorWithWhite:0.3 alpha:0.5].CGColor;
-    self.layer.borderWidth=0.5;
+    self.layer.borderColor=[UIColor colorWithWhite:0.3 alpha:0.5].CGColor;self.layer.borderWidth=0.5;
 
     gSearch=[[UITextField alloc]init];
     gSearch.backgroundColor=[UIColor colorWithWhite:0.18 alpha:1];
@@ -81,7 +201,6 @@ static void updateStartBtn(BOOL running) {
     gTV.font=[UIFont fontWithName:@"Menlo" size:10]?:[UIFont systemFontOfSize:10];
     gTV.text=@"[LazadaFarm] chờ WebView...";[sc addSubview:gTV];
 
-    // Bottom bar: Start + Copy
     gStartBtn=[UIButton buttonWithType:UIButtonTypeSystem];
     [gStartBtn setTitle:@"▶ Bắt đầu" forState:UIControlStateNormal];
     [gStartBtn setTitleColor:[UIColor colorWithRed:0.2 green:1.0 blue:0.4 alpha:1.0] forState:UIControlStateNormal];
@@ -106,6 +225,7 @@ static void updateStartBtn(BOOL running) {
 
     UIPanGestureRecognizer *pan=[[UIPanGestureRecognizer alloc]initWithTarget:self action:@selector(handlePan:)];
     pan.minimumNumberOfTouches=pan.maximumNumberOfTouches=1;[self addGestureRecognizer:pan];
+    [[UIPinchGestureRecognizer alloc]initWithTarget:self action:@selector(handlePinch:)];
     UIPinchGestureRecognizer *pinch=[[UIPinchGestureRecognizer alloc]initWithTarget:self action:@selector(handlePinch:)];
     [self addGestureRecognizer:pinch];
     UITapGestureRecognizer *dtap=[[UITapGestureRecognizer alloc]initWithTarget:self action:@selector(handleDoubleTap:)];
@@ -113,17 +233,15 @@ static void updateStartBtn(BOOL running) {
     return self;
 }
 
-- (void)layoutSubviews {
+-(void)layoutSubviews{
     [super layoutSubviews];if(!gVisible)return;
-    CGRect b=self.bounds;
-    CGFloat top=46,bh=36,gap=4;
+    CGRect b=self.bounds;CGFloat top=46,bh=36,gap=4;
     gSearch.frame=CGRectMake(8,8,b.size.width-16,30);
     UIScrollView *sc=(UIScrollView*)[self viewWithTag:99];
     sc.frame=CGRectMake(0,top,b.size.width,b.size.height-top-bh-gap);
     CGSize fit=[gTV sizeThatFits:CGSizeMake(b.size.width-8,CGFLOAT_MAX)];
     gTV.frame=CGRectMake(4,0,b.size.width-8,MAX(fit.height,sc.frame.size.height));
     sc.contentSize=CGSizeMake(b.size.width,gTV.frame.size.height);
-    // bottom: [Start 60%] [Copy 35%]
     CGFloat btnY=b.size.height-bh+4,bh2=bh-8;
     CGFloat startW=b.size.width*0.58,copyW=b.size.width*0.33;
     gStartBtn.frame=CGRectMake(6,btnY,startW,bh2);
@@ -131,13 +249,13 @@ static void updateStartBtn(BOOL running) {
     gCopyFeed.frame=gCopyBtn.frame;
 }
 
-- (void)handlePan:(UIPanGestureRecognizer*)g {
+-(void)handlePan:(UIPanGestureRecognizer*)g{
     CGPoint d=[g translationInView:self.superview];
     self.center=CGPointMake(self.center.x+d.x,self.center.y+d.y);
     [g setTranslation:CGPointZero inView:self.superview];
     if(g.state==UIGestureRecognizerStateEnded||g.state==UIGestureRecognizerStateCancelled)snapToEdge();
 }
-- (void)handlePinch:(UIPinchGestureRecognizer*)g {
+-(void)handlePinch:(UIPinchGestureRecognizer*)g{
     if(!gVisible||g.state!=UIGestureRecognizerStateChanged)return;
     gScale=MAX(0.4,MIN(2.5,gScale*g.scale));
     CGPoint c=self.center;
@@ -145,7 +263,7 @@ static void updateStartBtn(BOOL running) {
                           gBaseSize.width*gScale,gBaseSize.height*gScale);
     g.scale=1.0;
 }
-- (void)handleDoubleTap:(UITapGestureRecognizer*)g {
+-(void)handleDoubleTap:(UITapGestureRecognizer*)g{
     gVisible=!gVisible;
     CGFloat sw=self.superview?self.superview.bounds.size.width:390;
     if(!gVisible){
@@ -162,205 +280,167 @@ static void updateStartBtn(BOOL running) {
         }completion:^(BOOL f){[self setNeedsLayout];[self layoutIfNeeded];}];
     }
 }
-- (void)doStart {
-    // Toggle farm via JS postMessage vào WKWebView
-    // Dùng NSNotification để gọi sang WKWebView evaluateJavaScript
-    [[NSNotificationCenter defaultCenter] postNotificationName:@"LFToggleFarm" object:nil];
+-(void)doStart{
+    gFarmEnabled=!gFarmEnabled;
+    updateStartBtn(gFarmEnabled);
+    if(gFarmEnabled&&gActiveWebView){
+        updatePanel(@"[Farm] Bắt đầu farm...");
+        [self startFarmOnWebView:gActiveWebView];
+    }else{
+        updatePanel(@"[Farm] Đã dừng");
+    }
 }
-- (void)doCopy {
+-(void)doCopy{
     [UIPasteboard generalPasteboard].string=gTV.text?:@"";
     gCopyBtn.hidden=YES;gCopyFeed.hidden=NO;
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW,(int64_t)(1.5*NSEC_PER_SEC)),dispatch_get_main_queue(),^{
         gCopyBtn.hidden=NO;gCopyFeed.hidden=YES;
     });
 }
-- (void)searchChanged{applyFilter();[self setNeedsLayout];[self layoutIfNeeded];}
-- (UIView*)hitTest:(CGPoint)p withEvent:(UIEvent*)e {
+-(void)searchChanged{applyFilter();[self setNeedsLayout];[self layoutIfNeeded];}
+-(UIView*)hitTest:(CGPoint)p withEvent:(UIEvent*)e{
     UIView *h=[super hitTest:p withEvent:e];
     if(!gVisible)return h;
     return(h==self)?nil:h;
 }
+
+// ─── Farm logic dùng IOHIDEvent tap ───────────────────────
+-(void)startFarmOnWebView:(WKWebView*)wv{
+    if(!gFarmEnabled)return;
+    updatePanel(@"[Farm] Scan tasks...");
+
+    // Lấy tất cả pending tasks
+    NSString *js=@"(function(){"
+        "var all=document.querySelectorAll('.mission-item-center'),out=[];"
+        "for(var i=0;i<all.length;i++){"
+        "  var el=all[i],txt=el.textContent||'';"
+        "  if(!txt.match(/0\\/\\d/))continue;"
+        "  var btn=el.querySelector('.mission-item-btn-go');"
+        "  if(btn&&(btn.textContent||'').trim()==='Tìm kiếm')continue;"
+        "  var r=(btn||el).getBoundingClientRect();"
+        "  out.push({x:r.left+r.width/2,y:r.top+r.height/2,label:txt.substring(0,40)});"
+        "}"
+        // Điểm danh
+        "var c=document.querySelector('[class*=\"lazcoins-checkin-card\"][class*=\"checkin-\"]');"
+        "if(c){var cr=c.getBoundingClientRect();out.unshift({x:cr.left+cr.width/2,y:cr.top+cr.height/2,label:'CHECKIN',isCheckin:true});}"
+        "return JSON.stringify(out);"
+        "})()";
+
+    [wv evaluateJavaScript:js completionHandler:^(id result, NSError *err){
+        if(!result||[result isKindOfClass:[NSNull class]]){
+            updatePanel(@"[Farm] Không tìm thấy task");return;
+        }
+        NSData *data=[result dataUsingEncoding:NSUTF8StringEncoding];
+        NSArray *tasks=[NSJSONSerialization JSONObjectWithData:data options:0 error:nil];
+        if(!tasks.count){updatePanel(@"[Farm] ✓ Hết task hôm nay!");return;}
+
+        updatePanel([NSString stringWithFormat:@"[Farm] %lu tasks",(unsigned long)tasks.count]);
+        [self runTasks:tasks index:0 webView:wv];
+    }];
+}
+
+-(void)runTasks:(NSArray*)tasks index:(NSInteger)idx webView:(WKWebView*)wv{
+    if(!gFarmEnabled){updatePanel(@"[Farm] Đã dừng");return;}
+    if(idx>=(NSInteger)tasks.count){
+        // Lưu progress ngày hôm nay
+        NSString *today=[NSDateFormatter localizedStringFromDate:[NSDate date]
+            dateStyle:NSDateFormatterShortStyle timeStyle:NSDateFormatterNoStyle];
+        [[NSUserDefaults standardUserDefaults] setObject:today forKey:@"lfDoneDate"];
+        updatePanel(@"[Farm] ✓ Xong hôm nay!");
+        updateStartBtn(NO);gFarmEnabled=NO;
+        return;
+    }
+
+    NSDictionary *task=tasks[idx];
+    NSString *label=task[@"label"]?:@"?";
+    CGFloat wx=[task[@"x"] doubleValue];
+    CGFloat wy=[task[@"y"] doubleValue];
+    BOOL isCheckin=[task[@"isCheckin"] boolValue];
+
+    updatePanel([NSString stringWithFormat:@"[Farm] (%ld/%lu) %@",
+        (long)(idx+1),(unsigned long)tasks.count,label]);
+
+    // Convert WKWebView coords → screen coords → HID coords
+    CGPoint webOrigin=[wv convertPoint:CGPointZero toView:nil];
+    CGFloat s=UIScreen.mainScreen.scale;
+    CGPoint hidPt=CGPointMake((webOrigin.x+wx)*s,(webOrigin.y+wy)*s);
+
+    hidTap(hidPt);
+
+    NSTimeInterval delay = isCheckin ? 2.0 : 33.0;
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW,(int64_t)(delay*NSEC_PER_SEC)),
+                   dispatch_get_main_queue(),^{
+        if(!gFarmEnabled)return;
+        // back nếu không phải checkin
+        if(!isCheckin){
+            [wv evaluateJavaScript:@"history.back();" completionHandler:nil];
+            dispatch_after(dispatch_time(DISPATCH_TIME_NOW,(int64_t)(3*NSEC_PER_SEC)),
+                           dispatch_get_main_queue(),^{
+                [self runTasks:tasks index:idx+1 webView:wv];
+            });
+        }else{
+            [self runTasks:tasks index:idx+1 webView:wv];
+        }
+    });
+}
+
 @end
 
+// ─── Message handler ──────────────────────────────────────
 @implementation LFHandler
-- (void)userContentController:(WKUserContentController*)ucc didReceiveScriptMessage:(WKScriptMessage*)msg {
+-(void)userContentController:(WKUserContentController*)ucc didReceiveScriptMessage:(WKScriptMessage*)msg{
     NSDictionary *body=msg.body;
     if(![body isKindOfClass:[NSDictionary class]])return;
     NSString *type=body[@"type"]?:@"log";
-    if([@"status" isEqualToString:type]){
-        updatePanel(body[@"text"]?:@"");
-        BOOL running=[body[@"running"] boolValue];
-        updateStartBtn(running);
-        return;
-    }
+    if([@"status" isEqualToString:type]){updatePanel(body[@"text"]?:@"");return;}
     NSString *url=body[@"url"]?:@"";NSArray *els=body[@"elements"]?:@[];
     NSMutableString *t=[NSMutableString stringWithFormat:@"URL:\n%@\n\n",url];
-    if(els.count){[t appendFormat:@"Elements (%lu):\n",(unsigned long)els.count];for(NSString*e in els)[t appendFormat:@"• %@\n",e];}
+    if(els.count){[t appendFormat:@"Elements (%lu):\n",(unsigned long)els.count];
+        for(NSString*e in els)[t appendFormat:@"• %@\n",e];}
     else[t appendString:@"Chưa thấy element xu/checkin"];
     updatePanel(t);
+
+    // Track webview đang ở trang laz-coins
+    if([url containsString:@"laz-coins"]){
+        dispatch_async(dispatch_get_main_queue(),^{
+            gActiveWebView=(WKWebView*)msg.webView;
+            // Auto-start nếu enabled
+            if(gFarmEnabled&&gActiveWebView){
+                dispatch_after(dispatch_time(DISPATCH_TIME_NOW,(int64_t)(2*NSEC_PER_SEC)),
+                               dispatch_get_main_queue(),^{
+                    [(LFPanel*)gPanel startFarmOnWebView:gActiveWebView];
+                });
+            }
+        });
+    }
 }
 @end
 
-// ─── JS: 2 scripts ───────────────────────────────────────
-// Script A: chạy trên trang đích (không phải laz-coins)
-// Khi detect sessionStorage.lfActive=true → scroll simulation → back sau 33s
-static NSString *kScriptTarget = @""
+// ─── JS: logger only (tap dùng IOHIDEvent từ ObjC) ────────
+static NSString *kScript=@""
 "(function(){"
-"  if(location.href.indexOf('laz-coins')>-1)return;" // chỉ chạy trên trang đích
-"  if(sessionStorage.getItem('lfActive')!=='1')return;"
-"  function st(m){try{window.webkit.messageHandlers.lazadaFarm.postMessage({type:'status',text:'[Farm] '+m,running:true});}catch(e){}}"
-"  st('Đang xem trang...');"
-// simulate scroll để Lazada track visibility
-"  var scrolled=0;"
-"  var iv=setInterval(function(){"
-"    window.scrollBy(0,80);"
-"    scrolled+=80;"
-"    if(scrolled>600){clearInterval(iv);}"
-"  },500);"
-"})();";
-
-// Script B: farm loop trên laz-coins
-static NSString *kScriptMain = @""
-"(function(){"
-"if(window._lfInit)return;"
-"window._lfInit=true;"
-"window._lfFarming=false;"
-"window._lfEnabled=false;" // start/stop toggle
-
-"function st(m,running){"
-"  try{window.webkit.messageHandlers.lazadaFarm"
-"    .postMessage({type:'status',text:'[Farm] '+m,running:running===undefined?window._lfFarming:running});"
-"  }catch(e){}}"
-
-"function wait(ms){return new Promise(r=>setTimeout(r,ms));}"
-
-"function tap(el){"
-"  if(!el)return false;"
-"  var r=el.getBoundingClientRect(),x=r.left+r.width/2,y=r.top+r.height/2;"
-"  try{"
-"    var t=new Touch({identifier:Date.now(),target:el,clientX:x,clientY:y,"
-"      screenX:x,screenY:y,pageX:x,pageY:y,radiusX:1,radiusY:1,rotationAngle:0,force:1});"
-"    el.dispatchEvent(new TouchEvent('touchstart',{bubbles:true,cancelable:true,"
-"      touches:[t],targetTouches:[t],changedTouches:[t]}));"
-"    el.dispatchEvent(new TouchEvent('touchend',{bubbles:true,cancelable:true,"
-"      touches:[],targetTouches:[],changedTouches:[t]}));"
-"  }catch(e){}"
-"  el.dispatchEvent(new MouseEvent('click',{bubbles:true,cancelable:true,clientX:x,clientY:y}));"
-"  return true;}"
-
-// Lấy list task chưa làm, bỏ task "Tìm kiếm" (mở native UI)
-"function getPending(){"
-"  var all=document.querySelectorAll('.mission-item-center'),out=[];"
-"  for(var i=0;i<all.length;i++){"
-"    var el=all[i],txt=el.textContent||'';"
-"    if(!txt.match(/0\\/\\d/))continue;"
-"    var btn=el.querySelector('.mission-item-btn-go');"
-"    if(btn&&(btn.textContent||'').trim()==='Tìm kiếm')continue;"
-"    out.push({el:el,label:txt.substring(0,40)});}"
-"  return out;}"
-
-// Lưu progress vào localStorage để resume
-"function saveProgress(idx,total){"
-"  localStorage.setItem('lfIdx',''+idx);"
-"  localStorage.setItem('lfTotal',''+total);"
-"  localStorage.setItem('lfDate',new Date().toDateString());}"
-
-"function loadProgress(){"
-"  var d=localStorage.getItem('lfDate');"
-"  if(d!==new Date().toDateString())return 0;" // reset mỗi ngày
-"  return parseInt(localStorage.getItem('lfIdx')||'0');}"
-
-"async function farm(){"
-"  if(window._lfFarming)return;"
-"  window._lfFarming=true;"
-"  st('Bắt đầu...',true);"
-"  await wait(2500);"
-
-// Điểm danh
-"  var c=document.querySelector('[class*=\"lazcoins-checkin-card\"][class*=\"checkin-\"]');"
-"  if(c){st('Điểm danh...',true);tap(c);await wait(2000);}else st('Đã điểm danh',true);"
-
-// Mở mission list
-"  var mb=document.querySelector('.lazcoins-check-in-date');"
-"  if(mb){tap(mb);await wait(2000);}"
-
-"  var pending=getPending();"
-"  var startIdx=loadProgress();"
-"  st(''+pending.length+' task | tiếp từ #'+startIdx,true);"
-
-"  for(var j=startIdx;j<pending.length;j++){"
-"    if(!window._lfEnabled){st('Đã dừng',false);window._lfFarming=false;return;}"
-"    var task=pending[j];"
-"    st('('+(j+1)+'/'+pending.length+'): '+task.label,true);"
-"    saveProgress(j,pending.length);"
-"    var btn=task.el.querySelector('.mission-item-btn-go');"
-
-// Set flag cho trang đích biết đang farm
-"    sessionStorage.setItem('lfActive','1');"
-"    tap(btn||task.el);"
-"    await wait(33000);"
-"    sessionStorage.removeItem('lfActive');"
-
-"    if(location.href.indexOf('laz-coins')===-1){"
-"      history.back();"
-"      await wait(3000);"
-"      if(location.href.indexOf('laz-coins')===-1){window._lfFarming=false;return;}"
-"    }"
-"    var newP=getPending();"
-"    if(newP.length>0&&newP.length<=pending.length){pending=newP;}"
-"  }"
-
-"  saveProgress(0,0);" // reset progress khi xong
-"  st('✓ Xong hôm nay!',false);"
-"  window._lfFarming=false;}"
-
-// Toggle start/stop từ native button
-"window._lfToggle=function(){"
-"  window._lfEnabled=!window._lfEnabled;"
-"  if(window._lfEnabled){"
-"    st('Bắt đầu farm...',true);"
-"    if(location.href.indexOf('laz-coins')>-1)farm();"
-"  }else{"
-"    st('Đã dừng',false);"
-"    window._lfFarming=false;"
-"  }"
-"};"
-
-"var lastURL='';"
+"if(window._lfInit)return;window._lfInit=true;"
+"var last='';"
 "setInterval(function(){"
 "  var u=location.href;"
-"  if(u!==lastURL){"
-"    lastURL=u;"
-"    try{window.webkit.messageHandlers.lazadaFarm.postMessage({type:'log',url:u,elements:[]});}catch(e){}"
-"    if(u.indexOf('laz-coins')>-1&&window._lfEnabled&&!window._lfFarming)setTimeout(farm,1000);"
-"  }"
+"  if(u===last)return;last=u;"
+"  var found=[];"
+"  var els=document.querySelectorAll('.mission-item-center,.lazcoins-checkin-card');"
+"  for(var i=0;i<els.length;i++){"
+"    var t=(els[i].textContent||'').trim();"
+"    if(t.length>0&&t.length<80)found.push(t.substring(0,60));}"
+"  try{window.webkit.messageHandlers.lazadaFarm.postMessage({type:'log',url:u,elements:found});}catch(e){}"
 "},800);"
 "})();";
 
-// ─── WKWebView hook ───────────────────────────────────────
-static NSMutableArray *gWebViews = nil; // track active webviews để gọi toggle
-
 static IMP gOrigInit=NULL;
 static id swizzled_init(id self,SEL _cmd,CGRect frame,WKWebViewConfiguration *cfg){
-    // Script target: chạy trên tất cả trang
-    WKUserScript *sTarget=[[WKUserScript alloc]initWithSource:kScriptTarget
+    WKUserScript *s=[[WKUserScript alloc]initWithSource:kScript
         injectionTime:WKUserScriptInjectionTimeAtDocumentEnd forMainFrameOnly:YES];
-    // Script main: chạy trên tất cả trang nhưng chỉ active khi URL = laz-coins
-    WKUserScript *sMain=[[WKUserScript alloc]initWithSource:kScriptMain
-        injectionTime:WKUserScriptInjectionTimeAtDocumentEnd forMainFrameOnly:YES];
-    [cfg.userContentController addUserScript:sTarget];
-    [cfg.userContentController addUserScript:sMain];
-    @try{[cfg.userContentController addScriptMessageHandler:[[LFHandler alloc]init] name:@"lazadaFarm"];}@catch(NSException *e){}
-
-    id result=((id(*)(id,SEL,CGRect,WKWebViewConfiguration*))gOrigInit)(self,_cmd,frame,cfg);
-
-    // Track webview để gọi JS toggle
-    dispatch_async(dispatch_get_main_queue(),^{
-        if(!gWebViews)gWebViews=[NSMutableArray array];
-        [gWebViews addObject:[NSValue valueWithNonretainedObject:result]];
-    });
-
-    return result;
+    [cfg.userContentController addUserScript:s];
+    @try{[cfg.userContentController addScriptMessageHandler:[[LFHandler alloc]init]
+                                                       name:@"lazadaFarm"];}@catch(NSException *e){}
+    return((id(*)(id,SEL,CGRect,WKWebViewConfiguration*))gOrigInit)(self,_cmd,frame,cfg);
 }
 
 static void setupPanel(void){
@@ -372,17 +452,6 @@ static void setupPanel(void){
         gBaseSize=CGSizeMake(kw.bounds.size.width-20,220);
         gPanel=[[LFPanel alloc]initWithFrame:CGRectMake(10,60,gBaseSize.width,gBaseSize.height)];
         [kw addSubview:gPanel];[kw bringSubviewToFront:gPanel];
-
-        // Nhận toggle từ nút Start
-        [[NSNotificationCenter defaultCenter] addObserverForName:@"LFToggleFarm"
-            object:nil queue:[NSOperationQueue mainQueue] usingBlock:^(NSNotification *n){
-            // Gọi _lfToggle() trên tất cả webview đang active
-            for(NSValue *v in gWebViews){
-                WKWebView *wv=(WKWebView*)v.nonretainedObjectValue;
-                if([wv isKindOfClass:[WKWebView class]])
-                    [wv evaluateJavaScript:@"if(window._lfToggle)window._lfToggle();" completionHandler:nil];
-            }
-        }];
     });
 }
 
