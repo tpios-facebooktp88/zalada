@@ -3,186 +3,116 @@
 #import <WebKit/WebKit.h>
 #import <UIKit/UIKit.h>
 #import <CoreGraphics/CoreGraphics.h>
+#import <QuartzCore/QuartzCore.h>
 
-// ─── IOHIDEvent private API ───────────────────────────────
+// ─── BackBoardServices + IOHIDEvent ──────────────────────
 typedef struct __IOHIDEvent *IOHIDEventRef;
 typedef struct __IOHIDEventSystemClient *IOHIDEventSystemClientRef;
 
-extern IOHIDEventSystemClientRef IOHIDEventSystemClientCreate(CFAllocatorRef allocator);
-extern void IOHIDEventSystemClientDispatchEvent(IOHIDEventSystemClientRef client, IOHIDEventRef event);
-extern IOHIDEventRef IOHIDEventCreateDigitizerEvent(CFAllocatorRef, uint64_t, uint32_t, uint32_t, uint32_t, uint64_t, double, double, double, double, double, uint32_t, bool, bool, uint32_t);
-extern IOHIDEventRef IOHIDEventCreateDigitizerFingerEvent(CFAllocatorRef, uint64_t, uint32_t, uint32_t, uint32_t, double, double, double, double, double, uint32_t, bool, bool, uint32_t);
-extern void IOHIDEventAppendEvent(IOHIDEventRef parent, IOHIDEventRef child, uint32_t);
-extern void IOHIDEventSetSenderID(IOHIDEventRef, uint64_t);
-extern void IOHIDEventSetIntegerValue(IOHIDEventRef, uint32_t, int32_t);
-extern void IOHIDEventSetFloatValue(IOHIDEventRef, uint32_t, double);
+extern IOHIDEventSystemClientRef IOHIDEventSystemClientCreate(CFAllocatorRef);
+extern void IOHIDEventSystemClientDispatchEvent(IOHIDEventSystemClientRef, IOHIDEventRef);
+extern IOHIDEventRef IOHIDEventCreateDigitizerEvent(CFAllocatorRef,uint64_t,uint32_t,uint32_t,uint32_t,uint64_t,double,double,double,double,double,uint32_t,bool,bool,uint32_t);
+extern IOHIDEventRef IOHIDEventCreateDigitizerFingerEvent(CFAllocatorRef,uint64_t,uint32_t,uint32_t,uint32_t,double,double,double,double,double,uint32_t,bool,bool,uint32_t);
+extern void IOHIDEventAppendEvent(IOHIDEventRef,IOHIDEventRef,uint32_t);
+extern void IOHIDEventSetIntegerValue(IOHIDEventRef,uint32_t,int32_t);
 
-// kIOHIDEventFieldDigitizerIsDisplayIntegrated = 0x000D0019
-// kIOHIDEventFieldDigitizerType = 0x000D0001
-#define kIOHIDEventFieldDigitizerIsDisplayIntegrated 0x000D0019
-#define kIOHIDDigitizerEventTouch   (1 << 0)
-#define kIOHIDDigitizerEventRange   (1 << 1)
-#define kIOHIDTransducerTypeHand    4
-#define kIOHIDTransducerIndexFinger 1
+#define kHIDDisplayIntegrated 0x000D0019
+#define kHIDTouch  (1<<0)
+#define kHIDRange  (1<<1)
+#define kHIDHand   4
+#define kHIDFinger 1
 
-// ─── IOHIDEvent tap ───────────────────────────────────────
-static IOHIDEventSystemClientRef gHIDClient = NULL;
+static IOHIDEventSystemClientRef sHIDClient = NULL;
 
-static void hidTap(CGPoint point) {
-    if (!gHIDClient) {
-        gHIDClient = IOHIDEventSystemClientCreate(kCFAllocatorDefault);
-    }
-    if (!gHIDClient) return;
+static void hidTapAt(CGPoint screenPt, BOOL down) {
+    if (!sHIDClient) return;
+    uint64_t ts = mach_absolute_time();
+    double x = screenPt.x, y = screenPt.y;
+    uint32_t phase = down ? (kHIDTouch|kHIDRange) : (kHIDTouch|kHIDRange);
+    bool touching = down;
 
-    uint64_t ts = (uint64_t)(CACurrentMediaTime() * 1e9);
-    double x = point.x, y = point.y;
-
-    // touchstart
     IOHIDEventRef parent = IOHIDEventCreateDigitizerEvent(
-        kCFAllocatorDefault, ts,
-        kIOHIDTransducerTypeHand, 0, 1,
-        0, x, y, 0, 1.0, 0,
-        kIOHIDDigitizerEventTouch | kIOHIDDigitizerEventRange,
-        true, true, 0);
+        kCFAllocatorDefault,ts,kHIDHand,0,1,0,x,y,0,touching?1.0:0,0,
+        phase,touching,touching,0);
+    if (!parent) return;
 
     IOHIDEventRef finger = IOHIDEventCreateDigitizerFingerEvent(
-        kCFAllocatorDefault, ts,
-        kIOHIDTransducerIndexFinger, 2, 1,
-        x, y, 0, 1.0, 0,
-        kIOHIDDigitizerEventTouch | kIOHIDDigitizerEventRange,
-        true, true, 0);
+        kCFAllocatorDefault,ts,kHIDFinger,2,1,x,y,0,touching?1.0:0,0,
+        phase,touching,touching,0);
+    if (!finger) { CFRelease(parent); return; }
 
-    IOHIDEventSetIntegerValue(parent, kIOHIDEventFieldDigitizerIsDisplayIntegrated, 1);
-    IOHIDEventSetIntegerValue(finger, kIOHIDEventFieldDigitizerIsDisplayIntegrated, 1);
-    IOHIDEventAppendEvent(parent, finger, 0);
-    IOHIDEventSystemClientDispatchEvent(gHIDClient, parent);
+    IOHIDEventSetIntegerValue(parent,kHIDDisplayIntegrated,1);
+    IOHIDEventSetIntegerValue(finger,kHIDDisplayIntegrated,1);
+    IOHIDEventAppendEvent(parent,finger,0);
+    IOHIDEventSystemClientDispatchEvent(sHIDClient,parent);
     CFRelease(finger);
     CFRelease(parent);
-
-    // touchend sau 80ms
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(80 * NSEC_PER_MSEC)),
-                   dispatch_get_main_queue(), ^{
-        uint64_t ts2 = (uint64_t)(CACurrentMediaTime() * 1e9);
-
-        IOHIDEventRef parent2 = IOHIDEventCreateDigitizerEvent(
-            kCFAllocatorDefault, ts2,
-            kIOHIDTransducerTypeHand, 0, 1,
-            0, x, y, 0, 0, 0,
-            kIOHIDDigitizerEventTouch | kIOHIDDigitizerEventRange,
-            false, false, 0);
-
-        IOHIDEventRef finger2 = IOHIDEventCreateDigitizerFingerEvent(
-            kCFAllocatorDefault, ts2,
-            kIOHIDTransducerIndexFinger, 2, 1,
-            x, y, 0, 0, 0,
-            kIOHIDDigitizerEventTouch | kIOHIDDigitizerEventRange,
-            false, false, 0);
-
-        IOHIDEventSetIntegerValue(parent2, kIOHIDEventFieldDigitizerIsDisplayIntegrated, 1);
-        IOHIDEventSetIntegerValue(finger2, kIOHIDEventFieldDigitizerIsDisplayIntegrated, 1);
-        IOHIDEventAppendEvent(parent2, finger2, 0);
-        IOHIDEventSystemClientDispatchEvent(gHIDClient, parent2);
-        CFRelease(finger2);
-        CFRelease(parent2);
-    });
 }
 
-// ─── Tap element trong WKWebView bằng IOHIDEvent ──────────
-// Lấy CGPoint từ JS getBoundingClientRect rồi convert sang screen coords
-static void tapElementInWebView(WKWebView *wv, NSString *jsSelector, void(^completion)(BOOL)) {
-    NSString *js = [NSString stringWithFormat:
-        @"(function(){"
-         "var el=document.querySelector('%@');"
-         "if(!el)return null;"
-         "var r=el.getBoundingClientRect();"
-         "return JSON.stringify({x:r.left+r.width/2,y:r.top+r.height/2});"
-         "})()", jsSelector];
-
-    [wv evaluateJavaScript:js completionHandler:^(id result, NSError *err) {
-        if (!result || [result isKindOfClass:[NSNull class]]) {
-            if (completion) completion(NO);
-            return;
-        }
-        NSData *data = [result dataUsingEncoding:NSUTF8StringEncoding];
-        NSDictionary *pt = [NSJSONSerialization JSONObjectWithData:data options:0 error:nil];
-        if (!pt) { if (completion) completion(NO); return; }
-
-        // Convert WebView-relative coords → screen coords
-        CGFloat wx = [pt[@"x"] doubleValue];
-        CGFloat wy = [pt[@"y"] doubleValue];
-
-        // WKWebView frame trên screen
-        CGPoint webOrigin = [wv convertPoint:CGPointZero toView:nil];
-        // Thêm status bar offset nếu cần
-        CGFloat scale = UIScreen.mainScreen.scale;
-        CGPoint screenPt = CGPointMake((webOrigin.x + wx), (webOrigin.y + wy));
-
-        // HIDEvent dùng screen coords nhân scale
-        CGPoint hidPt = CGPointMake(screenPt.x * scale, screenPt.y * scale);
-        hidTap(hidPt);
-        if (completion) completion(YES);
-    }];
+// Tap tại screen point (HID coords = logical * scale)
+static void hidTap(CGPoint logicalPt) {
+    NSAssert([NSThread isMainThread], @"hidTap must run on main thread");
+    CGFloat s = UIScreen.mainScreen.scale;
+    CGPoint hp = CGPointMake(logicalPt.x * s, logicalPt.y * s);
+    hidTapAt(hp, YES);
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 80*NSEC_PER_MSEC),
+                   dispatch_get_main_queue(), ^{ hidTapAt(hp, NO); });
 }
 
-// ─── Panel ────────────────────────────────────────────────
+// ─── Panel & globals ──────────────────────────────────────
 @interface LFPanel : UIView
+-(void)startFarmOnWebView:(WKWebView*)wv;
 @end
 @interface LFHandler : NSObject <WKScriptMessageHandler>
 @end
 
-static LFPanel      *gPanel    = nil;
-static UILabel      *gTV       = nil;
-static UITextField  *gSearch   = nil;
-static UIButton     *gCopyBtn  = nil;
-static UIButton     *gStartBtn = nil;
-static UILabel      *gCopyFeed = nil;
-static NSString     *gFullLog  = @"";
-static BOOL          gVisible  = YES;
-static CGFloat       gScale    = 1.0;
-static CGSize        gBaseSize;
-static WKWebView    *gActiveWebView = nil; // track webview đang farm
-static BOOL          gFarmEnabled  = NO;
+static LFPanel     *gPanel      = nil;
+static UILabel     *gTV         = nil;
+static UITextField *gSearch     = nil;
+static UIButton    *gCopyBtn    = nil;
+static UIButton    *gStartBtn   = nil;
+static UILabel     *gCopyFeed   = nil;
+static NSString    *gFullLog    = @"";
+static BOOL         gVisible    = YES;
+static CGFloat      gScale      = 1.0;
+static CGSize       gBaseSize;
+static WKWebView   *gActiveWV   = nil;
+static BOOL         gEnabled    = NO;
+static BOOL         gFarming    = NO;
 
-static void snapToEdge(void) {
+static void snap(void){
     UIView *p=gPanel.superview;if(!p)return;
     CGRect fr=gPanel.frame;
-    CGFloat tx=(CGRectGetMidX(fr)<p.bounds.size.width/2.0)?10:p.bounds.size.width-fr.size.width-10;
+    CGFloat tx=(CGRectGetMidX(fr)<p.bounds.size.width/2)?10:p.bounds.size.width-fr.size.width-10;
     CGFloat ty=MAX(60,MIN(fr.origin.y,p.bounds.size.height-fr.size.height-34));
     [UIView animateWithDuration:0.3 delay:0 usingSpringWithDamping:0.7 initialSpringVelocity:0.5
-                        options:UIViewAnimationOptionCurveEaseOut
-                     animations:^{gPanel.frame=CGRectMake(tx,ty,fr.size.width,fr.size.height);}completion:nil];
+                        options:0 animations:^{gPanel.frame=CGRectMake(tx,ty,fr.size.width,fr.size.height);}completion:nil];
 }
-
-static void applyFilter(void){
-    NSString *kw=gSearch.text?:@"";
-    if(!kw.length){gTV.text=gFullLog;return;}
-    NSMutableString *out=[NSMutableString string];
-    for(NSString *l in [gFullLog componentsSeparatedByString:@"\n"])
-        if([l.lowercaseString containsString:kw.lowercaseString])[out appendFormat:@"%@\n",l];
-    gTV.text=out.length?out:@"Không tìm thấy";
-}
-
-static void updatePanel(NSString *text){
+static void log_(NSString *s){
     dispatch_async(dispatch_get_main_queue(),^{
-        gFullLog=text;if(gVisible)applyFilter();
+        gFullLog=s;
+        NSString *kw=gSearch.text?:@"";
+        if(!kw.length){gTV.text=s;return;}
+        NSMutableString *out=[NSMutableString string];
+        for(NSString *l in [s componentsSeparatedByString:@"\n"])
+            if([l.lowercaseString containsString:kw.lowercaseString])[out appendFormat:@"%@\n",l];
+        gTV.text=out.length?out:@"Không tìm thấy";
         gPanel.hidden=NO;[gPanel setNeedsLayout];[gPanel layoutIfNeeded];
     });
 }
-
-static void updateStartBtn(BOOL running){
+static void setBtn(BOOL on){
     dispatch_async(dispatch_get_main_queue(),^{
-        NSString *title=running?@"⏹ Dừng":@"▶ Bắt đầu";
-        UIColor *color=running?[UIColor colorWithRed:1.0 green:0.3 blue:0.3 alpha:1.0]
-                              :[UIColor colorWithRed:0.2 green:1.0 blue:0.4 alpha:1.0];
-        [gStartBtn setTitle:title forState:UIControlStateNormal];
-        [gStartBtn setTitleColor:color forState:UIControlStateNormal];
+        [gStartBtn setTitle:on?@"⏹ Dừng":@"▶ Bắt đầu" forState:UIControlStateNormal];
+        UIColor *c=on?[UIColor colorWithRed:1 green:0.3 blue:0.3 alpha:1]
+                     :[UIColor colorWithRed:0.2 green:1 blue:0.4 alpha:1];
+        [gStartBtn setTitleColor:c forState:UIControlStateNormal];
     });
 }
 
 @implementation LFPanel
--(instancetype)initWithFrame:(CGRect)frame{
-    self=[super initWithFrame:frame];if(!self)return nil;
-    self.backgroundColor=[UIColor colorWithWhite:0.05 alpha:0.90];
+-(instancetype)initWithFrame:(CGRect)f{
+    self=[super initWithFrame:f];if(!self)return nil;
+    self.backgroundColor=[UIColor colorWithWhite:0.05 alpha:0.9];
     self.layer.cornerRadius=14;self.clipsToBounds=YES;
     self.layer.borderColor=[UIColor colorWithWhite:0.3 alpha:0.5].CGColor;self.layer.borderWidth=0.5;
 
@@ -197,13 +127,13 @@ static void updateStartBtn(BOOL running){
 
     UIScrollView *sc=[[UIScrollView alloc]init];sc.tag=99;[self addSubview:sc];
     gTV=[[UILabel alloc]init];gTV.numberOfLines=0;
-    gTV.textColor=[UIColor colorWithRed:0.2 green:1.0 blue:0.4 alpha:1.0];
+    gTV.textColor=[UIColor colorWithRed:0.2 green:1 blue:0.4 alpha:1];
     gTV.font=[UIFont fontWithName:@"Menlo" size:10]?:[UIFont systemFontOfSize:10];
-    gTV.text=@"[LazadaFarm] chờ WebView...";[sc addSubview:gTV];
+    gTV.text=@"[LazadaFarm] chờ...";[sc addSubview:gTV];
 
     gStartBtn=[UIButton buttonWithType:UIButtonTypeSystem];
     [gStartBtn setTitle:@"▶ Bắt đầu" forState:UIControlStateNormal];
-    [gStartBtn setTitleColor:[UIColor colorWithRed:0.2 green:1.0 blue:0.4 alpha:1.0] forState:UIControlStateNormal];
+    [gStartBtn setTitleColor:[UIColor colorWithRed:0.2 green:1 blue:0.4 alpha:1] forState:UIControlStateNormal];
     gStartBtn.backgroundColor=[UIColor colorWithWhite:0.15 alpha:1];
     gStartBtn.layer.cornerRadius=8;gStartBtn.titleLabel.font=[UIFont boldSystemFontOfSize:12];
     [gStartBtn addTarget:self action:@selector(doStart) forControlEvents:UIControlEventTouchUpInside];
@@ -219,20 +149,18 @@ static void updateStartBtn(BOOL running){
 
     gCopyFeed=[[UILabel alloc]init];
     gCopyFeed.textAlignment=NSTextAlignmentCenter;
-    gCopyFeed.textColor=[UIColor colorWithRed:0.2 green:1.0 blue:0.4 alpha:1.0];
-    gCopyFeed.font=[UIFont systemFontOfSize:11];gCopyFeed.hidden=YES;gCopyFeed.text=@"✓ Copied!";
+    gCopyFeed.textColor=[UIColor colorWithRed:0.2 green:1 blue:0.4 alpha:1];
+    gCopyFeed.font=[UIFont systemFontOfSize:11];gCopyFeed.hidden=YES;gCopyFeed.text=@"✓ OK!";
     [self addSubview:gCopyFeed];
 
-    UIPanGestureRecognizer *pan=[[UIPanGestureRecognizer alloc]initWithTarget:self action:@selector(handlePan:)];
+    UIPanGestureRecognizer *pan=[[UIPanGestureRecognizer alloc]initWithTarget:self action:@selector(hp:)];
     pan.minimumNumberOfTouches=pan.maximumNumberOfTouches=1;[self addGestureRecognizer:pan];
-    [[UIPinchGestureRecognizer alloc]initWithTarget:self action:@selector(handlePinch:)];
-    UIPinchGestureRecognizer *pinch=[[UIPinchGestureRecognizer alloc]initWithTarget:self action:@selector(handlePinch:)];
-    [self addGestureRecognizer:pinch];
-    UITapGestureRecognizer *dtap=[[UITapGestureRecognizer alloc]initWithTarget:self action:@selector(handleDoubleTap:)];
-    dtap.numberOfTapsRequired=2;[self addGestureRecognizer:dtap];
+    UIPinchGestureRecognizer *pi=[[UIPinchGestureRecognizer alloc]initWithTarget:self action:@selector(hpi:)];
+    [self addGestureRecognizer:pi];
+    UITapGestureRecognizer *dt=[[UITapGestureRecognizer alloc]initWithTarget:self action:@selector(hdt:)];
+    dt.numberOfTapsRequired=2;[self addGestureRecognizer:dt];
     return self;
 }
-
 -(void)layoutSubviews{
     [super layoutSubviews];if(!gVisible)return;
     CGRect b=self.bounds;CGFloat top=46,bh=36,gap=4;
@@ -242,20 +170,18 @@ static void updateStartBtn(BOOL running){
     CGSize fit=[gTV sizeThatFits:CGSizeMake(b.size.width-8,CGFLOAT_MAX)];
     gTV.frame=CGRectMake(4,0,b.size.width-8,MAX(fit.height,sc.frame.size.height));
     sc.contentSize=CGSizeMake(b.size.width,gTV.frame.size.height);
-    CGFloat btnY=b.size.height-bh+4,bh2=bh-8;
-    CGFloat startW=b.size.width*0.58,copyW=b.size.width*0.33;
-    gStartBtn.frame=CGRectMake(6,btnY,startW,bh2);
-    gCopyBtn.frame=CGRectMake(startW+10,btnY,copyW,bh2);
+    CGFloat btnY=b.size.height-bh+4,bh2=bh-8,sw=b.size.width;
+    gStartBtn.frame=CGRectMake(6,btnY,sw*0.58,bh2);
+    gCopyBtn.frame=CGRectMake(sw*0.58+10,btnY,sw*0.33,bh2);
     gCopyFeed.frame=gCopyBtn.frame;
 }
-
--(void)handlePan:(UIPanGestureRecognizer*)g{
+-(void)hp:(UIPanGestureRecognizer*)g{
     CGPoint d=[g translationInView:self.superview];
     self.center=CGPointMake(self.center.x+d.x,self.center.y+d.y);
     [g setTranslation:CGPointZero inView:self.superview];
-    if(g.state==UIGestureRecognizerStateEnded||g.state==UIGestureRecognizerStateCancelled)snapToEdge();
+    if(g.state==UIGestureRecognizerStateEnded||g.state==UIGestureRecognizerStateCancelled)snap();
 }
--(void)handlePinch:(UIPinchGestureRecognizer*)g{
+-(void)hpi:(UIPinchGestureRecognizer*)g{
     if(!gVisible||g.state!=UIGestureRecognizerStateChanged)return;
     gScale=MAX(0.4,MIN(2.5,gScale*g.scale));
     CGPoint c=self.center;
@@ -263,9 +189,8 @@ static void updateStartBtn(BOOL running){
                           gBaseSize.width*gScale,gBaseSize.height*gScale);
     g.scale=1.0;
 }
--(void)handleDoubleTap:(UITapGestureRecognizer*)g{
-    gVisible=!gVisible;
-    CGFloat sw=self.superview?self.superview.bounds.size.width:390;
+-(void)hdt:(UITapGestureRecognizer*)g{
+    gVisible=!gVisible;CGFloat sw=self.superview?self.superview.bounds.size.width:390;
     if(!gVisible){
         [UIView animateWithDuration:0.25 animations:^{
             self.frame=CGRectMake(sw-54,80,44,44);self.layer.cornerRadius=22;
@@ -273,117 +198,116 @@ static void updateStartBtn(BOOL running){
         }];
     }else{
         gSearch.alpha=((UIScrollView*)[self viewWithTag:99]).alpha=gStartBtn.alpha=gCopyBtn.alpha=gCopyFeed.alpha=1;
-        applyFilter();
         [UIView animateWithDuration:0.3 animations:^{
             self.frame=CGRectMake(10,60,gBaseSize.width*gScale,gBaseSize.height*gScale);
             self.layer.cornerRadius=14;
-        }completion:^(BOOL f){[self setNeedsLayout];[self layoutIfNeeded];}];
+        }completion:^(BOOL x){[self setNeedsLayout];[self layoutIfNeeded];}];
     }
 }
 -(void)doStart{
-    gFarmEnabled=!gFarmEnabled;
-    updateStartBtn(gFarmEnabled);
-    if(gFarmEnabled&&gActiveWebView){
-        updatePanel(@"[Farm] Bắt đầu farm...");
-        [self startFarmOnWebView:gActiveWebView];
-    }else{
-        updatePanel(@"[Farm] Đã dừng");
-    }
+    gEnabled=!gEnabled;setBtn(gEnabled);
+    if(!gEnabled){gFarming=NO;log_(@"[Farm] Đã dừng");return;}
+    if(!gActiveWV){log_(@"[Farm] Chưa vào trang Xu — mở trang Xu trước");return;}
+    if(!gFarming)[self startFarmOnWebView:gActiveWV];
 }
 -(void)doCopy{
     [UIPasteboard generalPasteboard].string=gTV.text?:@"";
     gCopyBtn.hidden=YES;gCopyFeed.hidden=NO;
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW,(int64_t)(1.5*NSEC_PER_SEC)),dispatch_get_main_queue(),^{
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW,1500*NSEC_PER_MSEC),dispatch_get_main_queue(),^{
         gCopyBtn.hidden=NO;gCopyFeed.hidden=YES;
     });
 }
--(void)searchChanged{applyFilter();[self setNeedsLayout];[self layoutIfNeeded];}
+-(void)searchChanged{
+    NSString *kw=gSearch.text?:@"";
+    if(!kw.length){gTV.text=gFullLog;return;}
+    NSMutableString *out=[NSMutableString string];
+    for(NSString *l in [gFullLog componentsSeparatedByString:@"\n"])
+        if([l.lowercaseString containsString:kw.lowercaseString])[out appendFormat:@"%@\n",l];
+    gTV.text=out.length?out:@"Không tìm thấy";
+    [self setNeedsLayout];[self layoutIfNeeded];
+}
 -(UIView*)hitTest:(CGPoint)p withEvent:(UIEvent*)e{
     UIView *h=[super hitTest:p withEvent:e];
-    if(!gVisible)return h;
-    return(h==self)?nil:h;
+    if(!gVisible)return h;return(h==self)?nil:h;
 }
 
-// ─── Farm logic dùng IOHIDEvent tap ───────────────────────
+// ─── Farm ─────────────────────────────────────────────────
 -(void)startFarmOnWebView:(WKWebView*)wv{
-    if(!gFarmEnabled)return;
-    updatePanel(@"[Farm] Scan tasks...");
+    if(!wv||!gEnabled||gFarming)return;
+    gFarming=YES;log_(@"[Farm] Scan tasks...");
 
-    // Lấy tất cả pending tasks
     NSString *js=@"(function(){"
-        "var all=document.querySelectorAll('.mission-item-center'),out=[];"
-        "for(var i=0;i<all.length;i++){"
-        "  var el=all[i],txt=el.textContent||'';"
-        "  if(!txt.match(/0\\/\\d/))continue;"
-        "  var btn=el.querySelector('.mission-item-btn-go');"
-        "  if(btn&&(btn.textContent||'').trim()==='Tìm kiếm')continue;"
-        "  var r=(btn||el).getBoundingClientRect();"
-        "  out.push({x:r.left+r.width/2,y:r.top+r.height/2,label:txt.substring(0,40)});"
-        "}"
-        // Điểm danh
-        "var c=document.querySelector('[class*=\"lazcoins-checkin-card\"][class*=\"checkin-\"]');"
-        "if(c){var cr=c.getBoundingClientRect();out.unshift({x:cr.left+cr.width/2,y:cr.top+cr.height/2,label:'CHECKIN',isCheckin:true});}"
-        "return JSON.stringify(out);"
-        "})()";
+    "var out=[];"
+    // điểm danh
+    "var c=document.querySelector('[class*=\"lazcoins-checkin-card\"][class*=\"checkin-\"]');"
+    "if(c){var r=c.getBoundingClientRect();"
+    "  out.push({x:r.left+r.width/2,y:r.top+r.height/2,label:'CHECKIN',checkin:true});}"
+    // mission button "Kiếm thêm"
+    "var mb=document.querySelector('.lazcoins-check-in-date');"
+    "if(mb){var r=mb.getBoundingClientRect();"
+    "  out.push({x:r.left+r.width/2,y:r.top+r.height/2,label:'OPEN_MISSIONS',open:true});}"
+    // tasks
+    "var all=document.querySelectorAll('.mission-item-center');"
+    "for(var i=0;i<all.length;i++){"
+    "  var el=all[i],txt=el.textContent||'';"
+    "  if(!txt.match(/0\\/\\d/))continue;"
+    "  var btn=el.querySelector('.mission-item-btn-go');"
+    "  if(btn&&(btn.textContent||'').trim()==='Tìm kiếm')continue;"
+    "  var target=btn||el;"
+    "  var r=target.getBoundingClientRect();"
+    "  out.push({x:r.left+r.width/2,y:r.top+r.height/2,label:txt.substring(0,40)});}"
+    "return JSON.stringify(out);"
+    "})()";
 
-    [wv evaluateJavaScript:js completionHandler:^(id result, NSError *err){
-        if(!result||[result isKindOfClass:[NSNull class]]){
-            updatePanel(@"[Farm] Không tìm thấy task");return;
+    [wv evaluateJavaScript:js completionHandler:^(id res, NSError *err){
+        if(!res||[res isKindOfClass:[NSNull class]]||err){
+            log_([NSString stringWithFormat:@"[Farm] JS error: %@",err.localizedDescription?:@"nil"]);
+            gFarming=NO;return;
         }
-        NSData *data=[result dataUsingEncoding:NSUTF8StringEncoding];
-        NSArray *tasks=[NSJSONSerialization JSONObjectWithData:data options:0 error:nil];
-        if(!tasks.count){updatePanel(@"[Farm] ✓ Hết task hôm nay!");return;}
-
-        updatePanel([NSString stringWithFormat:@"[Farm] %lu tasks",(unsigned long)tasks.count]);
-        [self runTasks:tasks index:0 webView:wv];
+        NSArray *tasks=[NSJSONSerialization JSONObjectWithData:
+            [res dataUsingEncoding:NSUTF8StringEncoding] options:0 error:nil];
+        if(!tasks){log_(@"[Farm] Parse error");gFarming=NO;return;}
+        if(!tasks.count){log_(@"[Farm] ✓ Hết task!");gFarming=NO;setBtn(NO);gEnabled=NO;return;}
+        log_([NSString stringWithFormat:@"[Farm] %lu steps",(unsigned long)tasks.count]);
+        [self runStep:tasks idx:0 wv:wv];
     }];
 }
 
--(void)runTasks:(NSArray*)tasks index:(NSInteger)idx webView:(WKWebView*)wv{
-    if(!gFarmEnabled){updatePanel(@"[Farm] Đã dừng");return;}
-    if(idx>=(NSInteger)tasks.count){
-        // Lưu progress ngày hôm nay
-        NSString *today=[NSDateFormatter localizedStringFromDate:[NSDate date]
-            dateStyle:NSDateFormatterShortStyle timeStyle:NSDateFormatterNoStyle];
-        [[NSUserDefaults standardUserDefaults] setObject:today forKey:@"lfDoneDate"];
-        updatePanel(@"[Farm] ✓ Xong hôm nay!");
-        updateStartBtn(NO);gFarmEnabled=NO;
-        return;
+-(void)runStep:(NSArray*)tasks idx:(NSInteger)i wv:(WKWebView*)wv{
+    if(!gEnabled||i>=(NSInteger)tasks.count){
+        log_(@"[Farm] ✓ Xong hôm nay!");gFarming=NO;setBtn(NO);gEnabled=NO;return;
     }
+    NSDictionary *t=tasks[i];
+    NSString *label=t[@"label"]?:@"?";
+    BOOL isCheckin=[t[@"checkin"] boolValue];
+    BOOL isOpen=[t[@"open"] boolValue];
 
-    NSDictionary *task=tasks[idx];
-    NSString *label=task[@"label"]?:@"?";
-    CGFloat wx=[task[@"x"] doubleValue];
-    CGFloat wy=[task[@"y"] doubleValue];
-    BOOL isCheckin=[task[@"isCheckin"] boolValue];
+    log_([NSString stringWithFormat:@"[Farm] %ld/%lu: %@",(long)(i+1),(unsigned long)tasks.count,label]);
 
-    updatePanel([NSString stringWithFormat:@"[Farm] (%ld/%lu) %@",
-        (long)(idx+1),(unsigned long)tasks.count,label]);
-
-    // Convert WKWebView coords → screen coords → HID coords
+    // Convert WKWebView local coords → screen logical coords
+    CGFloat wx=[t[@"x"] doubleValue];
+    CGFloat wy=[t[@"y"] doubleValue];
     CGPoint webOrigin=[wv convertPoint:CGPointZero toView:nil];
-    CGFloat s=UIScreen.mainScreen.scale;
-    CGPoint hidPt=CGPointMake((webOrigin.x+wx)*s,(webOrigin.y+wy)*s);
+    CGPoint logPt=CGPointMake(webOrigin.x+wx, webOrigin.y+wy);
 
-    hidTap(hidPt);
+    hidTap(logPt);
 
-    NSTimeInterval delay = isCheckin ? 2.0 : 33.0;
+    NSTimeInterval delay = isCheckin ? 1.5 : isOpen ? 1.5 : 33.0;
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW,(int64_t)(delay*NSEC_PER_SEC)),
                    dispatch_get_main_queue(),^{
-        if(!gFarmEnabled)return;
-        // back nếu không phải checkin
-        if(!isCheckin){
+        if(!gEnabled)return;
+        if(!isCheckin&&!isOpen){
+            // back về trang missions
             [wv evaluateJavaScript:@"history.back();" completionHandler:nil];
-            dispatch_after(dispatch_time(DISPATCH_TIME_NOW,(int64_t)(3*NSEC_PER_SEC)),
+            dispatch_after(dispatch_time(DISPATCH_TIME_NOW,3*NSEC_PER_SEC),
                            dispatch_get_main_queue(),^{
-                [self runTasks:tasks index:idx+1 webView:wv];
+                [self runStep:tasks idx:i+1 wv:wv];
             });
         }else{
-            [self runTasks:tasks index:idx+1 webView:wv];
+            [self runStep:tasks idx:i+1 wv:wv];
         }
     });
 }
-
 @end
 
 // ─── Message handler ──────────────────────────────────────
@@ -391,60 +315,56 @@ static void updateStartBtn(BOOL running){
 -(void)userContentController:(WKUserContentController*)ucc didReceiveScriptMessage:(WKScriptMessage*)msg{
     NSDictionary *body=msg.body;
     if(![body isKindOfClass:[NSDictionary class]])return;
-    NSString *type=body[@"type"]?:@"log";
-    if([@"status" isEqualToString:type]){updatePanel(body[@"text"]?:@"");return;}
+    if([@"status" isEqualToString:body[@"type"]]){log_(body[@"text"]?:@"");return;}
     NSString *url=body[@"url"]?:@"";NSArray *els=body[@"elements"]?:@[];
     NSMutableString *t=[NSMutableString stringWithFormat:@"URL:\n%@\n\n",url];
     if(els.count){[t appendFormat:@"Elements (%lu):\n",(unsigned long)els.count];
         for(NSString*e in els)[t appendFormat:@"• %@\n",e];}
-    else[t appendString:@"Chưa thấy element xu/checkin"];
-    updatePanel(t);
-
-    // Track webview đang ở trang laz-coins
+    else[t appendString:@"Chưa thấy element"];
+    log_(t);
     if([url containsString:@"laz-coins"]){
         dispatch_async(dispatch_get_main_queue(),^{
-            gActiveWebView=(WKWebView*)msg.webView;
-            // Auto-start nếu enabled
-            if(gFarmEnabled&&gActiveWebView){
-                dispatch_after(dispatch_time(DISPATCH_TIME_NOW,(int64_t)(2*NSEC_PER_SEC)),
+            gActiveWV=(WKWebView*)msg.webView;
+            if(gEnabled&&!gFarming)
+                dispatch_after(dispatch_time(DISPATCH_TIME_NOW,2*NSEC_PER_SEC),
                                dispatch_get_main_queue(),^{
-                    [(LFPanel*)gPanel startFarmOnWebView:gActiveWebView];
+                    if(gEnabled&&!gFarming)[gPanel startFarmOnWebView:gActiveWV];
                 });
-            }
         });
     }
 }
 @end
 
-// ─── JS: logger only (tap dùng IOHIDEvent từ ObjC) ────────
 static NSString *kScript=@""
 "(function(){"
-"if(window._lfInit)return;window._lfInit=true;"
+"if(window._lfDone)return;window._lfDone=true;"
 "var last='';"
 "setInterval(function(){"
-"  var u=location.href;"
-"  if(u===last)return;last=u;"
+"  var u=location.href;if(u===last)return;last=u;"
 "  var found=[];"
-"  var els=document.querySelectorAll('.mission-item-center,.lazcoins-checkin-card');"
-"  for(var i=0;i<els.length;i++){"
-"    var t=(els[i].textContent||'').trim();"
-"    if(t.length>0&&t.length<80)found.push(t.substring(0,60));}"
-"  try{window.webkit.messageHandlers.lazadaFarm.postMessage({type:'log',url:u,elements:found});}catch(e){}"
+"  document.querySelectorAll('.mission-item-center,.lazcoins-checkin-card').forEach(function(e){"
+"    var t=(e.textContent||'').trim();"
+"    if(t.length&&t.length<80)found.push(t.substring(0,60));});"
+"  try{window.webkit.messageHandlers.lazadaFarm"
+"    .postMessage({type:'log',url:u,elements:found});}catch(e){}"
 "},800);"
 "})();";
 
 static IMP gOrigInit=NULL;
-static id swizzled_init(id self,SEL _cmd,CGRect frame,WKWebViewConfiguration *cfg){
+static id swizzled_init(id self,SEL _cmd,CGRect fr,WKWebViewConfiguration *cfg){
     WKUserScript *s=[[WKUserScript alloc]initWithSource:kScript
         injectionTime:WKUserScriptInjectionTimeAtDocumentEnd forMainFrameOnly:YES];
     [cfg.userContentController addUserScript:s];
     @try{[cfg.userContentController addScriptMessageHandler:[[LFHandler alloc]init]
-                                                       name:@"lazadaFarm"];}@catch(NSException *e){}
-    return((id(*)(id,SEL,CGRect,WKWebViewConfiguration*))gOrigInit)(self,_cmd,frame,cfg);
+                                                       name:@"lazadaFarm"];}@catch(id e){}
+    return((id(*)(id,SEL,CGRect,WKWebViewConfiguration*))gOrigInit)(self,_cmd,fr,cfg);
 }
 
 static void setupPanel(void){
     dispatch_async(dispatch_get_main_queue(),^{
+        // Init IOHIDEvent client
+        sHIDClient=IOHIDEventSystemClientCreate(kCFAllocatorDefault);
+
         UIWindow *kw=nil;
         for(UIWindow *w in UIApplication.sharedApplication.windows)if(w.isKeyWindow){kw=w;break;}
         if(!kw)kw=UIApplication.sharedApplication.windows.firstObject;
@@ -452,6 +372,9 @@ static void setupPanel(void){
         gBaseSize=CGSizeMake(kw.bounds.size.width-20,220);
         gPanel=[[LFPanel alloc]initWithFrame:CGRectMake(10,60,gBaseSize.width,gBaseSize.height)];
         [kw addSubview:gPanel];[kw bringSubviewToFront:gPanel];
+
+        if(!sHIDClient) log_(@"[Farm] ⚠ HID client nil — tap có thể không hoạt động");
+        else log_(@"[Farm] Ready. Mở trang Xu rồi bấm Bắt đầu.");
     });
 }
 
@@ -460,6 +383,6 @@ static void Init(void){
     Class wk=NSClassFromString(@"WKWebView");if(!wk)return;
     Method m=class_getInstanceMethod(wk,@selector(initWithFrame:configuration:));if(!m)return;
     gOrigInit=method_setImplementation(m,(IMP)swizzled_init);
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW,(int64_t)(2.0*NSEC_PER_SEC)),
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW,2*NSEC_PER_SEC),
                    dispatch_get_main_queue(),^{setupPanel();});
 }
