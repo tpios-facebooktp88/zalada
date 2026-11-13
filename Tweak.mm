@@ -21,11 +21,11 @@ static CGSize       gBaseSize;
 static void snapToEdge(void) {
     UIView *p = gPanel.superview; if (!p) return;
     CGRect fr = gPanel.frame;
-    CGFloat tx = (CGRectGetMidX(fr) < p.bounds.size.width/2.0) ? 10 : p.bounds.size.width - fr.size.width - 10;
-    CGFloat ty = MAX(60, MIN(fr.origin.y, p.bounds.size.height - fr.size.height - 34));
+    CGFloat tx = (CGRectGetMidX(fr) < p.bounds.size.width/2.0) ? 10 : p.bounds.size.width-fr.size.width-10;
+    CGFloat ty = MAX(60, MIN(fr.origin.y, p.bounds.size.height-fr.size.height-34));
     [UIView animateWithDuration:0.3 delay:0 usingSpringWithDamping:0.7 initialSpringVelocity:0.5
                         options:UIViewAnimationOptionCurveEaseOut
-                     animations:^{ gPanel.frame = CGRectMake(tx, ty, fr.size.width, fr.size.height); } completion:nil];
+                     animations:^{ gPanel.frame=CGRectMake(tx,ty,fr.size.width,fr.size.height); } completion:nil];
 }
 
 static void applyFilter(void) {
@@ -33,7 +33,7 @@ static void applyFilter(void) {
     if (!kw.length) { gTV.text = gFullLog; return; }
     NSMutableString *out = [NSMutableString string];
     for (NSString *l in [gFullLog componentsSeparatedByString:@"\n"])
-        if ([l.lowercaseString containsString:kw.lowercaseString]) [out appendFormat:@"%@\n", l];
+        if ([l.lowercaseString containsString:kw.lowercaseString]) [out appendFormat:@"%@\n",l];
     gTV.text = out.length ? out : @"Không tìm thấy";
 }
 
@@ -83,32 +83,32 @@ static void updatePanel(NSString *text) {
     gCopyFeed.font = [UIFont systemFontOfSize:12]; gCopyFeed.hidden = YES; gCopyFeed.text = @"✓ Đã copy!";
     [self addSubview:gCopyFeed];
 
-    for (UIGestureRecognizer *gr in @[
-        ({ UIPanGestureRecognizer *g = [[UIPanGestureRecognizer alloc] initWithTarget:self action:@selector(handlePan:)];
-           g.minimumNumberOfTouches = g.maximumNumberOfTouches = 1; g; }),
-        [[UIPinchGestureRecognizer alloc] initWithTarget:self action:@selector(handlePinch:)],
-        ({ UITapGestureRecognizer *g = [[UITapGestureRecognizer alloc] initWithTarget:self action:@selector(handleDoubleTap:)];
-           g.numberOfTapsRequired = 2; g; })
-    ]) [self addGestureRecognizer:gr];
+    UIPanGestureRecognizer *pan = [[UIPanGestureRecognizer alloc] initWithTarget:self action:@selector(handlePan:)];
+    pan.minimumNumberOfTouches = pan.maximumNumberOfTouches = 1;
+    [self addGestureRecognizer:pan];
+    UIPinchGestureRecognizer *pinch = [[UIPinchGestureRecognizer alloc] initWithTarget:self action:@selector(handlePinch:)];
+    [self addGestureRecognizer:pinch];
+    UITapGestureRecognizer *dtap = [[UITapGestureRecognizer alloc] initWithTarget:self action:@selector(handleDoubleTap:)];
+    dtap.numberOfTapsRequired = 2; [self addGestureRecognizer:dtap];
     return self;
 }
 
 - (void)layoutSubviews {
     [super layoutSubviews]; if (!gVisible) return;
-    CGRect b = self.bounds; CGFloat top = 46, bh = 36, gap = 4;
-    gSearch.frame = CGRectMake(8, 8, b.size.width-16, 30);
+    CGRect b = self.bounds; CGFloat top=46,bh=36,gap=4;
+    gSearch.frame = CGRectMake(8,8,b.size.width-16,30);
     UIScrollView *sc = (UIScrollView *)[self viewWithTag:99];
-    sc.frame = CGRectMake(0, top, b.size.width, b.size.height-top-bh-gap);
-    CGSize fit = [gTV sizeThatFits:CGSizeMake(b.size.width-8, CGFLOAT_MAX)];
-    gTV.frame = CGRectMake(4, 0, b.size.width-8, MAX(fit.height, sc.frame.size.height));
-    sc.contentSize = CGSizeMake(b.size.width, gTV.frame.size.height);
-    CGFloat btnW=110, btnY=b.size.height-bh+4;
-    gCopyBtn.frame = gCopyFeed.frame = CGRectMake(b.size.width/2-btnW/2, btnY, btnW, bh-8);
+    sc.frame = CGRectMake(0,top,b.size.width,b.size.height-top-bh-gap);
+    CGSize fit = [gTV sizeThatFits:CGSizeMake(b.size.width-8,CGFLOAT_MAX)];
+    gTV.frame = CGRectMake(4,0,b.size.width-8,MAX(fit.height,sc.frame.size.height));
+    sc.contentSize = CGSizeMake(b.size.width,gTV.frame.size.height);
+    CGFloat btnW=110,btnY=b.size.height-bh+4;
+    gCopyBtn.frame = gCopyFeed.frame = CGRectMake(b.size.width/2-btnW/2,btnY,btnW,bh-8);
 }
 
 - (void)handlePan:(UIPanGestureRecognizer *)g {
     CGPoint d = [g translationInView:self.superview];
-    self.center = CGPointMake(self.center.x+d.x, self.center.y+d.y);
+    self.center = CGPointMake(self.center.x+d.x,self.center.y+d.y);
     [g setTranslation:CGPointZero inView:self.superview];
     if (g.state==UIGestureRecognizerStateEnded||g.state==UIGestureRecognizerStateCancelled) snapToEdge();
 }
@@ -116,8 +116,8 @@ static void updatePanel(NSString *text) {
     if (!gVisible||g.state!=UIGestureRecognizerStateChanged) return;
     gScale = MAX(0.4,MIN(2.5,gScale*g.scale));
     CGPoint c = self.center;
-    self.frame = CGRectMake(c.x-gBaseSize.width*gScale/2, c.y-gBaseSize.height*gScale/2,
-                            gBaseSize.width*gScale, gBaseSize.height*gScale);
+    self.frame = CGRectMake(c.x-gBaseSize.width*gScale/2,c.y-gBaseSize.height*gScale/2,
+                            gBaseSize.width*gScale,gBaseSize.height*gScale);
     g.scale = 1.0;
 }
 - (void)handleDoubleTap:(UITapGestureRecognizer *)g {
@@ -125,15 +125,15 @@ static void updatePanel(NSString *text) {
     CGFloat sw = self.superview ? self.superview.bounds.size.width : 390;
     if (!gVisible) {
         [UIView animateWithDuration:0.25 animations:^{
-            self.frame = CGRectMake(sw-54, 80, 44, 44); self.layer.cornerRadius = 22;
-            gSearch.alpha = ((UIScrollView *)[self viewWithTag:99]).alpha = gCopyBtn.alpha = gCopyFeed.alpha = 0;
+            self.frame=CGRectMake(sw-54,80,44,44); self.layer.cornerRadius=22;
+            gSearch.alpha=((UIScrollView*)[self viewWithTag:99]).alpha=gCopyBtn.alpha=gCopyFeed.alpha=0;
         }];
     } else {
-        gSearch.alpha = ((UIScrollView *)[self viewWithTag:99]).alpha = gCopyBtn.alpha = gCopyFeed.alpha = 1;
+        gSearch.alpha=((UIScrollView*)[self viewWithTag:99]).alpha=gCopyBtn.alpha=gCopyFeed.alpha=1;
         applyFilter();
         [UIView animateWithDuration:0.3 animations:^{
-            self.frame = CGRectMake(10,60,gBaseSize.width*gScale,gBaseSize.height*gScale);
-            self.layer.cornerRadius = 14;
+            self.frame=CGRectMake(10,60,gBaseSize.width*gScale,gBaseSize.height*gScale);
+            self.layer.cornerRadius=14;
         } completion:^(BOOL f){ [self setNeedsLayout]; [self layoutIfNeeded]; }];
     }
 }
@@ -146,27 +146,30 @@ static void updatePanel(NSString *text) {
 }
 - (void)searchChanged { applyFilter(); [self setNeedsLayout]; [self layoutIfNeeded]; }
 - (UIView *)hitTest:(CGPoint)p withEvent:(UIEvent *)e {
-    UIView *h = [super hitTest:p withEvent:e];
-    return (!gVisible||h==self) ? (gVisible?nil:h) : h;
+    UIView *h=[super hitTest:p withEvent:e];
+    if(!gVisible)return h;
+    return (h==self)?nil:h;
 }
 @end
 
 @implementation LFHandler
 - (void)userContentController:(WKUserContentController *)ucc didReceiveScriptMessage:(WKScriptMessage *)msg {
-    NSDictionary *body = msg.body;
-    if (![body isKindOfClass:[NSDictionary class]]) return;
-    if ([@"status" isEqualToString:body[@"type"]]) { updatePanel(body[@"text"]?:@""); return; }
+    NSDictionary *body=msg.body;
+    if(![body isKindOfClass:[NSDictionary class]])return;
+    if([@"status" isEqualToString:body[@"type"]]){updatePanel(body[@"text"]?:@"");return;}
     NSString *url=body[@"url"]?:@""; NSArray *els=body[@"elements"]?:@[];
     NSMutableString *t=[NSMutableString stringWithFormat:@"URL:\n%@\n\n",url];
-    if (els.count) { [t appendFormat:@"Elements (%lu):\n",(unsigned long)els.count]; for(NSString*e in els)[t appendFormat:@"• %@\n",e]; }
+    if(els.count){[t appendFormat:@"Elements (%lu):\n",(unsigned long)els.count];for(NSString*e in els)[t appendFormat:@"• %@\n",e];}
     else [t appendString:@"Chưa thấy element xu/checkin"];
     updatePanel(t);
 }
 @end
 
-// ─── Farm JS ──────────────────────────────────────────────
 static NSString *kScript = @""
 "(function(){"
+"if(window._lfRunning)return;"  // guard chống double inject
+"window._lfRunning=true;"
+
 "function st(m){try{window.webkit.messageHandlers.lazadaFarm.postMessage({type:'status',text:'[Farm] '+m});}catch(e){}}"
 "function wait(ms){return new Promise(r=>setTimeout(r,ms));}"
 "function tap(el){"
@@ -180,14 +183,21 @@ static NSString *kScript = @""
 "  el.dispatchEvent(new MouseEvent('click',{bubbles:true,cancelable:true,clientX:x,clientY:y}));"
 "  return true;}"
 
+// Lọc bỏ task "Tìm kiếm" - mở native UI, không automation được
 "function getPending(){"
 "  var all=document.querySelectorAll('.mission-item-center'),out=[];"
-"  for(var i=0;i<all.length;i++)"
-"    if((all[i].textContent||'').match(/0\\/\\d/))"
-"      out.push({el:all[i],label:(all[i].textContent||'').substring(0,40)});"
+"  for(var i=0;i<all.length;i++){"
+"    var item=all[i];"
+"    var txt=item.textContent||'';"
+"    if(!txt.match(/0\\/\\d/))continue;"      // chỉ lấy task chưa làm
+"    var btn=item.querySelector('.mission-item-btn-go');"
+"    var btnTxt=(btn?btn.textContent:'').trim();"
+"    if(btnTxt==='Tìm kiếm')continue;"        // SKIP task search - mở native UI
+"    out.push({el:item,label:txt.substring(0,40)});}"
 "  return out;}"
 
 "var farming=false;"
+"var retries={};"
 "async function farm(){"
 "  if(farming)return; farming=true;"
 "  st('Bắt đầu...'); await wait(2500);"
@@ -205,14 +215,17 @@ static NSString *kScript = @""
 
 "  for(var j=0;j<pending.length;j++){"
 "    var task=pending[j];"
-"    st('Làm ('+( j+1)+'/'+pending.length+'): '+task.label);"
+"    var key=task.label;"
+"    retries[key]=(retries[key]||0)+1;"
+"    if(retries[key]>2){st('Skip (stuck): '+key);continue;}" // skip nếu retry quá 2 lần
+"    st('('+(j+1)+'/'+pending.length+') '+task.label);"
 "    var btn=task.el.querySelector('.mission-item-btn-go');"
 "    tap(btn||task.el);"
-// luôn chờ 33s rồi back — bất kể navigate hay không
 "    await wait(33000);"
 "    history.back();"
 "    await wait(3000);"
-// re-query để lấy list mới sau khi back
+// nếu back ra ngoài laz-coins thì dừng, để setInterval trigger lại
+"    if(location.href.indexOf('laz-coins')===-1){farming=false;return;}"
 "    var newP=getPending();"
 "    if(newP.length>0){pending=newP;j=-1;}"
 "  }"
@@ -233,16 +246,17 @@ static NSString *kScript = @""
 
 static IMP gOrigInit=NULL;
 static id swizzled_init(id self,SEL _cmd,CGRect frame,WKWebViewConfiguration *cfg){
-    WKUserScript *s=[[WKUserScript alloc]initWithSource:kScript injectionTime:WKUserScriptInjectionTimeAtDocumentEnd forMainFrameOnly:NO];
+    WKUserScript *s=[[WKUserScript alloc]initWithSource:kScript
+        injectionTime:WKUserScriptInjectionTimeAtDocumentEnd forMainFrameOnly:YES];
     [cfg.userContentController addUserScript:s];
-    [cfg.userContentController addScriptMessageHandler:[[LFHandler alloc]init] name:@"lazadaFarm"];
+    @try{[cfg.userContentController addScriptMessageHandler:[[LFHandler alloc]init] name:@"lazadaFarm"];}@catch(NSException *e){}
     return((id(*)(id,SEL,CGRect,WKWebViewConfiguration*))gOrigInit)(self,_cmd,frame,cfg);
 }
 
 static void setupPanel(void){
     dispatch_async(dispatch_get_main_queue(),^{
         UIWindow *kw=nil;
-        for(UIWindow *w in UIApplication.sharedApplication.windows) if(w.isKeyWindow){kw=w;break;}
+        for(UIWindow *w in UIApplication.sharedApplication.windows)if(w.isKeyWindow){kw=w;break;}
         if(!kw)kw=UIApplication.sharedApplication.windows.firstObject;
         if(!kw)return;
         gBaseSize=CGSizeMake(kw.bounds.size.width-20,220);
@@ -253,8 +267,9 @@ static void setupPanel(void){
 
 __attribute__((constructor))
 static void Init(void){
-    Class wk=NSClassFromString(@"WKWebView"); if(!wk)return;
-    Method m=class_getInstanceMethod(wk,@selector(initWithFrame:configuration:)); if(!m)return;
+    Class wk=NSClassFromString(@"WKWebView");if(!wk)return;
+    Method m=class_getInstanceMethod(wk,@selector(initWithFrame:configuration:));if(!m)return;
     gOrigInit=method_setImplementation(m,(IMP)swizzled_init);
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW,(int64_t)(2.0*NSEC_PER_SEC)),dispatch_get_main_queue(),^{setupPanel();});
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW,(int64_t)(2.0*NSEC_PER_SEC)),
+                   dispatch_get_main_queue(),^{setupPanel();});
 }
