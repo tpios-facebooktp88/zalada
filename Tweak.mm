@@ -4,11 +4,9 @@
 #import <UIKit/UIKit.h>
 #import <CoreGraphics/CoreGraphics.h>
 #import <mach/mach_time.h>
+#import <dlfcn.h>
 
-// ─── BackBoardServices touch injection ───────────────────
-// Cách Cham.dylib dùng: BKSHIDEvent qua BackBoardServices
-// Không cần entitlement riêng - iOS load BBS cho mọi app
-
+// ─── IOHIDEvent / BackBoardServices ──────────────────────
 typedef struct __IOHIDEvent *IOHIDEventRef;
 
 extern IOHIDEventRef IOHIDEventCreateDigitizerEvent(
@@ -22,103 +20,61 @@ extern IOHIDEventRef IOHIDEventCreateDigitizerFingerEvent(
 extern void IOHIDEventAppendEvent(IOHIDEventRef, IOHIDEventRef, uint32_t);
 extern void IOHIDEventSetIntegerValue(IOHIDEventRef, uint32_t, int32_t);
 
-// BKSHIDEvent approach - qua BackBoardServices
-typedef void *BKSHIDEventRef;
-extern BKSHIDEventRef BKSHIDEventSetDigitizerInfo(IOHIDEventRef, uint32_t, bool, bool, void*, float, float);
-
 #define kHIDDisplayIntegrated 0x000D0019
 #define kHIDTouch  (1<<0)
 #define kHIDRange  (1<<1)
 #define kHIDHand   4
 #define kHIDFinger 1
 
-static void* sBBSHandle = NULL; // BackBoardServices dlopen handle
+static void *sBBSHandle = NULL;
 
-// Dispatch touch qua GSEvent (GlobalServices) - cách an toàn nhất
-// Tất cả app iOS đều có GSEvent system
-static void gsSendTouchAtPoint(CGPoint point, int phase) {
-    // phase 1=began, 2=moved, 3=ended
-    // Dùng UIApplication _enqueueHIDEvent approach
-    // hoặc fallback sang Accessibility
-}
-
-// Safe tap: thử BBS, fallback sang Accessibility API
-static BOOL sTapReady = NO;
-
-static void safeTap(CGPoint screenPt) {
-    // Load BackBoardServices dynamically
-    if (!sBBSHandle) {
-        sBBSHandle = dlopen("/System/Library/PrivateFrameworks/BackBoardServices.framework/BackBoardServices", RTLD_NOW);
-    }
-
-    uint64_t ts = mach_absolute_time();
-    double x = screenPt.x, y = screenPt.y;
+static void dispatchHIDEvent(double x, double y, bool down) {
+    uint64_t ts   = mach_absolute_time();
     uint32_t phase = kHIDTouch | kHIDRange;
 
     IOHIDEventRef parent = IOHIDEventCreateDigitizerEvent(
         kCFAllocatorDefault, ts, kHIDHand, 0, 1, 0,
-        x, y, 0, 1.0, 0, phase, true, true, 0);
+        x, y, 0, down ? 1.0 : 0.0, 0, phase, down, down, 0);
     if (!parent) return;
 
     IOHIDEventRef finger = IOHIDEventCreateDigitizerFingerEvent(
         kCFAllocatorDefault, ts, kHIDFinger, 2, 1,
-        x, y, 0, 1.0, 0, phase, true, true, 0);
+        x, y, 0, down ? 1.0 : 0.0, 0, phase, down, down, 0);
     if (!finger) { CFRelease(parent); return; }
 
     IOHIDEventSetIntegerValue(parent, kHIDDisplayIntegrated, 1);
     IOHIDEventSetIntegerValue(finger, kHIDDisplayIntegrated, 1);
     IOHIDEventAppendEvent(parent, finger, 0);
 
-    // Dispatch qua BKSHIDEventSetDigitizerInfo nếu có
+    // BKSHIDEventSetDigitizerInfo nếu BBS loaded
     if (sBBSHandle) {
-        void (*bksSet)(IOHIDEventRef, uint32_t, bool, bool, void*, float, float) =
-            dlsym(sBBSHandle, "BKSHIDEventSetDigitizerInfo");
-        if (bksSet) bksSet(parent, 0, true, false, NULL, 0, 0);
+        typedef void (*BKSFn)(IOHIDEventRef, uint32_t, bool, bool, void*, float, float);
+        BKSFn bks = (BKSFn)dlsym(sBBSHandle, "BKSHIDEventSetDigitizerInfo");
+        if (bks) bks(parent, 0, down, false, NULL, 0, 0);
     }
 
-    // Dispatch trực tiếp vào UIApplication event queue
-    // _UIApplicationHandleEventQueue là private nhưng luôn có
+    // Dispatch via UIApplication _enqueueHIDEvent:
     UIApplication *app = [UIApplication sharedApplication];
     SEL sel = NSSelectorFromString(@"_enqueueHIDEvent:");
     if ([app respondsToSelector:sel]) {
-        // suppress warning
-        ((void(*)(id,SEL,IOHIDEventRef))[app methodForSelector:sel])(app, sel, parent);
+        IMP imp = [app methodForSelector:sel];
+        ((void(*)(id,SEL,IOHIDEventRef))imp)(app, sel, parent);
     }
 
     CFRelease(finger);
     CFRelease(parent);
-
-    // Touchend sau 80ms
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 80*NSEC_PER_MSEC),
-                   dispatch_get_main_queue(), ^{
-        uint64_t ts2 = mach_absolute_time();
-        IOHIDEventRef p2 = IOHIDEventCreateDigitizerEvent(
-            kCFAllocatorDefault, ts2, kHIDHand, 0, 1, 0,
-            x, y, 0, 0, 0, phase, false, false, 0);
-        if (!p2) return;
-        IOHIDEventRef f2 = IOHIDEventCreateDigitizerFingerEvent(
-            kCFAllocatorDefault, ts2, kHIDFinger, 2, 1,
-            x, y, 0, 0, 0, phase, false, false, 0);
-        if (!f2) { CFRelease(p2); return; }
-        IOHIDEventSetIntegerValue(p2, kHIDDisplayIntegrated, 1);
-        IOHIDEventSetIntegerValue(f2, kHIDDisplayIntegrated, 1);
-        IOHIDEventAppendEvent(p2, f2, 0);
-        if (sBBSHandle) {
-            void (*bksSet)(IOHIDEventRef, uint32_t, bool, bool, void*, float, float) =
-                dlsym(sBBSHandle, "BKSHIDEventSetDigitizerInfo");
-            if (bksSet) bksSet(p2, 0, false, false, NULL, 0, 0);
-        }
-        SEL sel2 = NSSelectorFromString(@"_enqueueHIDEvent:");
-        UIApplication *a = [UIApplication sharedApplication];
-        if ([a respondsToSelector:sel2])
-            ((void(*)(id,SEL,IOHIDEventRef))[a methodForSelector:sel2])(a, sel2, p2);
-        CFRelease(f2); CFRelease(p2);
-    });
 }
 
 static void tapAtPoint(CGPoint logicalPt) {
-    CGFloat s = UIScreen.mainScreen.scale;
-    safeTap(CGPointMake(logicalPt.x * s, logicalPt.y * s));
+    CGFloat s  = UIScreen.mainScreen.scale;
+    double x   = logicalPt.x * s;
+    double y   = logicalPt.y * s;
+
+    dispatchHIDEvent(x, y, true);
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 80 * NSEC_PER_MSEC),
+                   dispatch_get_main_queue(), ^{
+        dispatchHIDEvent(x, y, false);
+    });
 }
 
 // ─── Globals ──────────────────────────────────────────────
@@ -181,6 +137,17 @@ static void setStartBtn(BOOL on) {
     });
 }
 
+static UIWindow *getKeyWindow(void) {
+    for (UIScene *scene in UIApplication.sharedApplication.connectedScenes) {
+        if (![scene isKindOfClass:[UIWindowScene class]]) continue;
+        UIWindowScene *ws = (UIWindowScene *)scene;
+        for (UIWindow *w in ws.windows) {
+            if (w.isKeyWindow) return w;
+        }
+    }
+    return nil;
+}
+
 @implementation LFPanel
 - (instancetype)initWithFrame:(CGRect)frame {
     self = [super initWithFrame:frame]; if (!self) return nil;
@@ -214,7 +181,8 @@ static void setStartBtn(BOOL on) {
     gStartBtn.backgroundColor    = [UIColor colorWithWhite:0.15 alpha:1];
     gStartBtn.layer.cornerRadius = 8;
     gStartBtn.titleLabel.font    = [UIFont boldSystemFontOfSize:12];
-    [gStartBtn addTarget:self action:@selector(doStart) forControlEvents:UIControlEventTouchUpInside];
+    [gStartBtn addTarget:self action:@selector(doStart)
+        forControlEvents:UIControlEventTouchUpInside];
     [self addSubview:gStartBtn];
 
     gCopyBtn = [UIButton buttonWithType:UIButtonTypeSystem];
@@ -223,7 +191,8 @@ static void setStartBtn(BOOL on) {
     gCopyBtn.backgroundColor    = [UIColor colorWithWhite:0.12 alpha:1];
     gCopyBtn.layer.cornerRadius = 8;
     gCopyBtn.titleLabel.font    = [UIFont systemFontOfSize:11];
-    [gCopyBtn addTarget:self action:@selector(doCopy) forControlEvents:UIControlEventTouchUpInside];
+    [gCopyBtn addTarget:self action:@selector(doCopy)
+        forControlEvents:UIControlEventTouchUpInside];
     [self addSubview:gCopyBtn];
 
     gCopyFeed = [[UILabel alloc] init];
@@ -295,10 +264,10 @@ static void setStartBtn(BOOL on) {
     }
 }
 - (void)doStart {
-    gEnabled = !gEnabled; setStartBtn(gEnabled);
-    if (!gEnabled) { gFarming=NO; logMsg(@"[Farm] Đã dừng"); return; }
-    if (!gActiveWV) { logMsg(@"[Farm] ⚠ Chưa vào trang Xu — mở trang Xu trước"); return; }
-    if (!gFarming) [self startFarmOnWebView:gActiveWV];
+    gEnabled=!gEnabled; setStartBtn(gEnabled);
+    if (!gEnabled){gFarming=NO;logMsg(@"[Farm] Đã dừng");return;}
+    if (!gActiveWV){logMsg(@"[Farm] ⚠ Chưa vào trang Xu — mở trang Xu trước");return;}
+    if (!gFarming)[self startFarmOnWebView:gActiveWV];
 }
 - (void)doCopy {
     [UIPasteboard generalPasteboard].string = gTV.text ?: @"";
@@ -404,7 +373,7 @@ static void setStartBtn(BOOL on) {
     NSDictionary *body=msg.body;
     if(![body isKindOfClass:[NSDictionary class]])return;
     if([@"status" isEqualToString:body[@"type"]]){logMsg(body[@"text"]?:@"");return;}
-    NSString *url=body[@"url"]?:@"";NSArray *els=body[@"elements"]?:@[];
+    NSString *url=body[@"url"]?:@""; NSArray *els=body[@"elements"]?:@[];
     NSMutableString *t=[NSMutableString stringWithFormat:@"URL:\n%@\n\n",url];
     if(els.count){[t appendFormat:@"Elements (%lu):\n",(unsigned long)els.count];
         for(NSString*e in els)[t appendFormat:@"• %@\n",e];}
@@ -451,18 +420,17 @@ static id swizzled_init(id self,SEL _cmd,CGRect fr,WKWebViewConfiguration *cfg){
 
 static void setupPanel(void){
     dispatch_async(dispatch_get_main_queue(),^{
-        // Load BBS trước
-        sBBSHandle=dlopen("/System/Library/PrivateFrameworks/BackBoardServices.framework/BackBoardServices",RTLD_NOW|RTLD_GLOBAL);
+        sBBSHandle=dlopen(
+            "/System/Library/PrivateFrameworks/BackBoardServices.framework/BackBoardServices",
+            RTLD_NOW|RTLD_GLOBAL);
 
-        UIWindow *kw=nil;
-        for(UIWindow *w in UIApplication.sharedApplication.windows)if(w.isKeyWindow){kw=w;break;}
-        if(!kw)kw=UIApplication.sharedApplication.windows.firstObject;
-        if(!kw)return;
+        UIWindow *kw = getKeyWindow();
+        if (!kw) return;
         gBaseSize=CGSizeMake(kw.bounds.size.width-20,220);
         gPanel=[[LFPanel alloc]initWithFrame:CGRectMake(10,60,gBaseSize.width,gBaseSize.height)];
         [kw addSubview:gPanel];[kw bringSubviewToFront:gPanel];
-        logMsg(sBBSHandle?@"[Farm] Ready — mở trang Xu rồi bấm Bắt đầu"
-                         :@"[Farm] ⚠ BBS load failed");
+        logMsg(sBBSHandle ? @"[Farm] Ready — mở trang Xu rồi bấm Bắt đầu"
+                          : @"[Farm] ⚠ BBS load failed");
     });
 }
 
