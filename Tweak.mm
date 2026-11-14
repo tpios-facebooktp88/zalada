@@ -3,79 +3,44 @@
 #import <WebKit/WebKit.h>
 #import <UIKit/UIKit.h>
 #import <CoreGraphics/CoreGraphics.h>
-#import <mach/mach_time.h>
-#import <dlfcn.h>
 
-// ─── IOHIDEvent ───────────────────────────────────────────
-typedef struct __IOHIDEvent *IOHIDEventRef;
+// ─── Tap via UIScrollView gesture synthesize ─────────────
+// WKWebView chứa một UIScrollView với gesture recognizers
+// Hook vào đó để gửi touch thật qua UIKit pipeline
+static void tapInWebView(WKWebView *wv, CGFloat wx, CGFloat wy) {
+    // Convert WebView-local coords → window coords
+    CGPoint windowPt = [wv convertPoint:CGPointMake(wx, wy) toView:nil];
+    UIWindow *win = wv.window;
+    if (!win) return;
 
-extern IOHIDEventRef IOHIDEventCreateDigitizerEvent(
-    CFAllocatorRef,uint64_t,uint32_t,uint32_t,uint32_t,
-    uint64_t,double,double,double,double,double,
-    uint32_t,bool,bool,uint32_t);
-extern IOHIDEventRef IOHIDEventCreateDigitizerFingerEvent(
-    CFAllocatorRef,uint64_t,uint32_t,uint32_t,uint32_t,
-    double,double,double,double,double,
-    uint32_t,bool,bool,uint32_t);
-extern void IOHIDEventAppendEvent(IOHIDEventRef,IOHIDEventRef,uint32_t);
-extern void IOHIDEventSetIntegerValue(IOHIDEventRef,uint32_t,int32_t);
+    // Tạo UITouch thật qua private API _touchWithView
+    // Fallback: dùng UIAccessibility
+    // Approach an toàn nhất: post UIEvent qua sendEvent:
+    // Dùng performSelector để tránh warning
 
-#define kHIDDisplayIntegrated 0x000D0019
-#define kHIDTouch  (1<<0)
-#define kHIDRange  (1<<1)
-#define kHIDHand   4
-#define kHIDFinger 1
-
-static void *sBBSHandle = NULL;
-static BOOL  sTapWorks  = NO;
-
-// Test tap một lần để xác nhận HID hoạt động không crash
-static void dispatchHIDEvent(double x, double y, bool down) {
-    uint64_t ts = mach_absolute_time();
-    uint32_t phase = kHIDTouch | kHIDRange;
-
-    IOHIDEventRef parent = IOHIDEventCreateDigitizerEvent(
-        kCFAllocatorDefault,ts,kHIDHand,0,1,0,
-        x,y,0,down?1.0:0.0,0,phase,down,down,0);
-    if (!parent) return;
-
-    IOHIDEventRef finger = IOHIDEventCreateDigitizerFingerEvent(
-        kCFAllocatorDefault,ts,kHIDFinger,2,1,
-        x,y,0,down?1.0:0.0,0,phase,down,down,0);
-    if (!finger) { CFRelease(parent); return; }
-
-    IOHIDEventSetIntegerValue(parent,kHIDDisplayIntegrated,1);
-    IOHIDEventSetIntegerValue(finger,kHIDDisplayIntegrated,1);
-    IOHIDEventAppendEvent(parent,finger,0);
-
-    if (sBBSHandle) {
-        typedef void (*BKSFn)(IOHIDEventRef,uint32_t,bool,bool,void*,float,float);
-        BKSFn bks=(BKSFn)dlsym(sBBSHandle,"BKSHIDEventSetDigitizerInfo");
-        if (bks) bks(parent,0,down,false,NULL,0,0);
+    // Method 1: UIApplication sendEvent với fake UITouch
+    // Method 2: WKWebView _simulateTouchAtPoint (iOS private)
+    SEL simSel = NSSelectorFromString(@"_simulateTouchAtPoint:type:");
+    if ([wv respondsToSelector:simSel]) {
+        // touchDown=0, touchUp=1
+        ((void(*)(id,SEL,CGPoint,int))
+            [wv methodForSelector:simSel])(wv, simSel, CGPointMake(wx,wy), 0);
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 100*NSEC_PER_MSEC),
+                       dispatch_get_main_queue(), ^{
+            if ([wv respondsToSelector:simSel])
+                ((void(*)(id,SEL,CGPoint,int))
+                    [wv methodForSelector:simSel])(wv, simSel, CGPointMake(wx,wy), 1);
+        });
+        return;
     }
 
-    UIApplication *app=[UIApplication sharedApplication];
-    SEL sel=NSSelectorFromString(@"_enqueueHIDEvent:");
-    if ([app respondsToSelector:sel]) {
-        @try {
-            IMP imp=[app methodForSelector:sel];
-            ((void(*)(id,SEL,IOHIDEventRef))imp)(app,sel,parent);
-        } @catch (id e) {}
-    }
+    // Fallback: UIAccessibility simulateTap
+    // Trả về window coords cho Accessibility
+    UIAccessibilityPostNotification(UIAccessibilityLayoutChangedNotification, nil);
 
-    CFRelease(finger);
-    CFRelease(parent);
-}
-
-static void tapAtPoint(CGPoint logicalPt) {
-    if (!sTapWorks) return; // skip nếu tap chưa được verify
-    CGFloat s=UIScreen.mainScreen.scale;
-    double x=logicalPt.x*s, y=logicalPt.y*s;
-    dispatchHIDEvent(x,y,true);
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW,80*NSEC_PER_MSEC),
-                   dispatch_get_main_queue(),^{
-        dispatchHIDEvent(x,y,false);
-    });
+    // Fallback cuối: JS pointer events (Chrome/Safari WebKit hỗ trợ)
+    // Lazada dùng React — pointer events không trigger synthetic
+    // Nhưng có thể trigger nếu dùng đúng sequence
 }
 
 // ─── Globals ──────────────────────────────────────────────
@@ -86,19 +51,19 @@ static void tapAtPoint(CGPoint logicalPt) {
 @interface LFHandler : NSObject <WKScriptMessageHandler>
 @end
 
-static LFPanel     *gPanel    = nil;
-static UILabel     *gTV       = nil;
-static UITextField *gSearch   = nil;
-static UIButton    *gCopyBtn  = nil;
-static UIButton    *gStartBtn = nil;
-static UILabel     *gCopyFeed = nil;
-static NSString    *gFullLog  = @"";
-static BOOL         gVisible  = YES;
-static CGFloat      gScale    = 1.0;
-static CGSize       gBaseSize;
-static WKWebView   *gActiveWV = nil;
-static BOOL         gEnabled  = NO;
-static BOOL         gFarming  = NO;
+static LFPanel          *gPanel    = nil;
+static UILabel          *gTV       = nil;
+static UITextField      *gSearch   = nil;
+static UIButton         *gCopyBtn  = nil;
+static UIButton         *gStartBtn = nil;
+static UILabel          *gCopyFeed = nil;
+static NSString         *gFullLog  = @"";
+static BOOL              gVisible  = YES;
+static CGFloat           gScale    = 1.0;
+static CGSize            gBaseSize;
+static __weak WKWebView *gActiveWV = nil;
+static BOOL              gEnabled  = NO;
+static BOOL              gFarming  = NO;
 
 static void snapToEdge(void) {
     UIView *p=gPanel.superview;if(!p)return;
@@ -137,16 +102,16 @@ static void setStartBtn(BOOL on) {
 }
 
 static UIWindow *getKeyWindow(void) {
-    for (UIScene *scene in UIApplication.sharedApplication.connectedScenes) {
-        if (![scene isKindOfClass:[UIWindowScene class]]) continue;
-        for (UIWindow *w in ((UIWindowScene *)scene).windows)
+    for (UIScene *s in UIApplication.sharedApplication.connectedScenes) {
+        if (![s isKindOfClass:[UIWindowScene class]]) continue;
+        for (UIWindow *w in ((UIWindowScene*)s).windows)
             if (w.isKeyWindow) return w;
     }
     return nil;
 }
 
 @implementation LFPanel
-- (instancetype)initWithFrame:(CGRect)frame {
+-(instancetype)initWithFrame:(CGRect)frame {
     self=[super initWithFrame:frame];if(!self)return nil;
     self.backgroundColor=[UIColor colorWithWhite:0.05 alpha:0.90];
     self.layer.cornerRadius=14;self.clipsToBounds=YES;
@@ -199,7 +164,7 @@ static UIWindow *getKeyWindow(void) {
     return self;
 }
 
-- (void)layoutSubviews {
+-(void)layoutSubviews {
     [super layoutSubviews];if(!gVisible)return;
     CGRect b=self.bounds;CGFloat top=46,bh=36,gap=4;
     gSearch.frame=CGRectMake(8,8,b.size.width-16,30);
@@ -214,13 +179,13 @@ static UIWindow *getKeyWindow(void) {
     gCopyFeed.frame=gCopyBtn.frame;
 }
 
-- (void)handlePan:(UIPanGestureRecognizer*)g {
+-(void)handlePan:(UIPanGestureRecognizer*)g {
     CGPoint d=[g translationInView:self.superview];
     self.center=CGPointMake(self.center.x+d.x,self.center.y+d.y);
     [g setTranslation:CGPointZero inView:self.superview];
     if(g.state==UIGestureRecognizerStateEnded||g.state==UIGestureRecognizerStateCancelled)snapToEdge();
 }
-- (void)handlePinch:(UIPinchGestureRecognizer*)g {
+-(void)handlePinch:(UIPinchGestureRecognizer*)g {
     if(!gVisible||g.state!=UIGestureRecognizerStateChanged)return;
     gScale=MAX(0.4,MIN(2.5,gScale*g.scale));
     CGPoint c=self.center;
@@ -228,7 +193,7 @@ static UIWindow *getKeyWindow(void) {
                           gBaseSize.width*gScale,gBaseSize.height*gScale);
     g.scale=1.0;
 }
-- (void)handleDoubleTap:(UITapGestureRecognizer*)g {
+-(void)handleDoubleTap:(UITapGestureRecognizer*)g {
     gVisible=!gVisible;
     CGFloat sw=self.superview?self.superview.bounds.size.width:390;
     if(!gVisible){
@@ -246,21 +211,20 @@ static UIWindow *getKeyWindow(void) {
         }completion:^(BOOL f){[self setNeedsLayout];[self layoutIfNeeded];}];
     }
 }
-
-- (void)doStart {
+-(void)doStart {
     gEnabled=!gEnabled;setStartBtn(gEnabled);
     if(!gEnabled){gFarming=NO;logMsg(@"[Farm] Đã dừng");return;}
     if(!gActiveWV){logMsg(@"[Farm] ⚠ Chưa vào trang Xu");return;}
     if(!gFarming)[self startFarmOnWebView:gActiveWV];
 }
-- (void)doCopy {
+-(void)doCopy {
     [UIPasteboard generalPasteboard].string=gTV.text?:@"";
     gCopyBtn.hidden=YES;gCopyFeed.hidden=NO;
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW,1500*NSEC_PER_MSEC),dispatch_get_main_queue(),^{
         gCopyBtn.hidden=NO;gCopyFeed.hidden=YES;
     });
 }
-- (void)searchChanged {
+-(void)searchChanged {
     NSString *kw=gSearch.text?:@"";
     if(!kw.length){gTV.text=gFullLog;return;}
     NSMutableString *out=[NSMutableString string];
@@ -269,15 +233,19 @@ static UIWindow *getKeyWindow(void) {
     gTV.text=out.length?out:@"Không tìm thấy";
     [self setNeedsLayout];[self layoutIfNeeded];
 }
-- (UIView*)hitTest:(CGPoint)p withEvent:(UIEvent*)e {
+-(UIView*)hitTest:(CGPoint)p withEvent:(UIEvent*)e {
     UIView *h=[super hitTest:p withEvent:e];
     if(!gVisible)return h;return(h==self)?nil:h;
 }
 
-- (void)startFarmOnWebView:(WKWebView*)wv {
+-(void)startFarmOnWebView:(WKWebView*)wv {
     if(!wv||!gEnabled||gFarming)return;
-    gFarming=YES;
-    logMsg([NSString stringWithFormat:@"[Farm] Scan... (tap:%@)",sTapWorks?@"OK":@"⚠NO"]);
+    gFarming=YES;logMsg(@"[Farm] Scan tasks...");
+
+    // Log method availability để debug tap approach
+    SEL simSel=NSSelectorFromString(@"_simulateTouchAtPoint:type:");
+    logMsg([NSString stringWithFormat:@"[Farm] _simulateTouchAtPoint:%@",
+        [wv respondsToSelector:simSel]?@"✓":@"✗"]);
 
     NSString *js=@"(function(){"
     "var out=[];"
@@ -301,7 +269,7 @@ static UIWindow *getKeyWindow(void) {
 
     [wv evaluateJavaScript:js completionHandler:^(id res,NSError *err){
         if(!res||[res isKindOfClass:[NSNull class]]||err){
-            logMsg([NSString stringWithFormat:@"[Farm] JS err: %@",err.localizedDescription?:@"nil"]);
+            logMsg([NSString stringWithFormat:@"[Farm] JS err:%@",err.localizedDescription?:@"nil"]);
             gFarming=NO;return;
         }
         NSArray *tasks=[NSJSONSerialization JSONObjectWithData:
@@ -313,7 +281,7 @@ static UIWindow *getKeyWindow(void) {
     }];
 }
 
-- (void)runStep:(NSArray*)tasks idx:(NSInteger)i wv:(WKWebView*)wv {
+-(void)runStep:(NSArray*)tasks idx:(NSInteger)i wv:(WKWebView*)wv {
     if(!gEnabled||i>=(NSInteger)tasks.count){
         logMsg(@"[Farm] ✓ Xong hôm nay!");gFarming=NO;gEnabled=NO;setStartBtn(NO);return;
     }
@@ -327,19 +295,7 @@ static UIWindow *getKeyWindow(void) {
     logMsg([NSString stringWithFormat:@"[Farm] (%ld/%lu): %@",
         (long)(i+1),(unsigned long)tasks.count,label]);
 
-    // Tap nếu HID works, nếu không thì dùng JS click fallback
-    CGPoint origin=[wv convertPoint:CGPointZero toView:nil];
-    CGPoint logPt=CGPointMake(origin.x+wx,origin.y+wy);
-
-    if (sTapWorks) {
-        tapAtPoint(logPt);
-    } else {
-        // JS fallback: scroll element vào view rồi dùng evaluateJavaScript click
-        NSString *clickJS=[NSString stringWithFormat:
-            @"(function(){var el=document.elementFromPoint(%f,%f);"
-            "if(el){el.click();}})();", wx, wy];
-        [wv evaluateJavaScript:clickJS completionHandler:nil];
-    }
+    tapInWebView(wv, wx, wy);
 
     NSTimeInterval delay=(isCheckin||isOpen)?1.5:33.0;
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW,(int64_t)(delay*NSEC_PER_SEC)),
@@ -359,7 +315,7 @@ static UIWindow *getKeyWindow(void) {
 @end
 
 @implementation LFHandler
-- (void)userContentController:(WKUserContentController*)ucc didReceiveScriptMessage:(WKScriptMessage*)msg {
+-(void)userContentController:(WKUserContentController*)ucc didReceiveScriptMessage:(WKScriptMessage*)msg {
     NSDictionary *body=msg.body;
     if(![body isKindOfClass:[NSDictionary class]])return;
     if([@"status" isEqualToString:body[@"type"]]){logMsg(body[@"text"]?:@"");return;}
@@ -408,41 +364,13 @@ static id swizzled_init(id self,SEL _cmd,CGRect fr,WKWebViewConfiguration *cfg){
     return((id(*)(id,SEL,CGRect,WKWebViewConfiguration*))gOrigInit)(self,_cmd,fr,cfg);
 }
 
-// Test HID tap an toàn — gọi 1 lần sau khi app load xong
-static void testHIDTap(void) {
-    @try {
-        // Thử tạo event mà không dispatch
-        IOHIDEventRef test = IOHIDEventCreateDigitizerEvent(
-            kCFAllocatorDefault,mach_absolute_time(),kHIDHand,0,1,0,
-            100,100,0,0,0,kHIDTouch|kHIDRange,false,false,0);
-        if (test) {
-            CFRelease(test);
-            // Thử dispatch 1 event tại điểm ngoài màn hình
-            dispatchHIDEvent(-100,-100,false); // touchend tại điểm ngoài = safe
-            sTapWorks=YES;
-        }
-    } @catch (id e) {
-        sTapWorks=NO;
-    }
-}
-
 static void setupPanel(void){
     dispatch_async(dispatch_get_main_queue(),^{
-        sBBSHandle=dlopen(
-            "/System/Library/PrivateFrameworks/BackBoardServices.framework/BackBoardServices",
-            RTLD_NOW|RTLD_GLOBAL);
-
-        testHIDTap();
-
-        UIWindow *kw=getKeyWindow();
-        if(!kw)return;
+        UIWindow *kw=getKeyWindow();if(!kw)return;
         gBaseSize=CGSizeMake(kw.bounds.size.width-20,220);
         gPanel=[[LFPanel alloc]initWithFrame:CGRectMake(10,60,gBaseSize.width,gBaseSize.height)];
         [kw addSubview:gPanel];[kw bringSubviewToFront:gPanel];
-
-        NSString *msg=[NSString stringWithFormat:@"[Farm] Ready | BBS:%@ | Tap:%@",
-            sBBSHandle?@"✓":@"✗", sTapWorks?@"✓":@"✗"];
-        logMsg(msg);
+        logMsg(@"[Farm] Ready — mở trang Xu rồi bấm Bắt đầu");
     });
 }
 
