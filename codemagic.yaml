@@ -11,17 +11,20 @@ workflows:
           SDKROOT="$(xcrun --sdk iphoneos --show-sdk-path)"
           mkdir -p build
           xcrun clang \
-            -target arm64-apple-ios16.0 \
-            -isysroot "$SDKROOT" \
-            -fobjc-arc \
-            -dynamiclib \
-            -Xlinker -undefined \
-            -Xlinker dynamic_lookup \
-            -framework Foundation \
-            -framework WebKit \
-            -framework UIKit \
-            -o build/lazada.dylib \
-            Tweak.mm
+   -target arm64-apple-ios16.0 \
+  -isysroot "$SDKROOT" \
+  -fobjc-arc \
+  -dynamiclib \
+  -Xlinker -undefined \
+  -Xlinker dynamic_lookup \
+  -framework Foundation \
+  -framework WebKit \
+  -framework UIKit \
+  -framework IOKit \
+  -lobjc \
+  -install_name @rpath/lazada.dylib \
+  -o build/LazadaFarm.dylib \
+  Tweak.mm
 
       - name: Package
         script: |
