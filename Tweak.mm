@@ -3,45 +3,7 @@
 #import <WebKit/WebKit.h>
 #import <UIKit/UIKit.h>
 #import <CoreGraphics/CoreGraphics.h>
-
-// ─── Tap via UIScrollView gesture synthesize ─────────────
-// WKWebView chứa một UIScrollView với gesture recognizers
-// Hook vào đó để gửi touch thật qua UIKit pipeline
-static void tapInWebView(WKWebView *wv, CGFloat wx, CGFloat wy) {
-    // Convert WebView-local coords → window coords
-    CGPoint windowPt = [wv convertPoint:CGPointMake(wx, wy) toView:nil];
-    UIWindow *win = wv.window;
-    if (!win) return;
-
-    // Tạo UITouch thật qua private API _touchWithView
-    // Fallback: dùng UIAccessibility
-    // Approach an toàn nhất: post UIEvent qua sendEvent:
-    // Dùng performSelector để tránh warning
-
-    // Method 1: UIApplication sendEvent với fake UITouch
-    // Method 2: WKWebView _simulateTouchAtPoint (iOS private)
-    SEL simSel = NSSelectorFromString(@"_simulateTouchAtPoint:type:");
-    if ([wv respondsToSelector:simSel]) {
-        // touchDown=0, touchUp=1
-        ((void(*)(id,SEL,CGPoint,int))
-            [wv methodForSelector:simSel])(wv, simSel, CGPointMake(wx,wy), 0);
-        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 100*NSEC_PER_MSEC),
-                       dispatch_get_main_queue(), ^{
-            if ([wv respondsToSelector:simSel])
-                ((void(*)(id,SEL,CGPoint,int))
-                    [wv methodForSelector:simSel])(wv, simSel, CGPointMake(wx,wy), 1);
-        });
-        return;
-    }
-
-    // Fallback: UIAccessibility simulateTap
-    // Trả về window coords cho Accessibility
-    UIAccessibilityPostNotification(UIAccessibilityLayoutChangedNotification, nil);
-
-    // Fallback cuối: JS pointer events (Chrome/Safari WebKit hỗ trợ)
-    // Lazada dùng React — pointer events không trigger synthetic
-    // Nhưng có thể trigger nếu dùng đúng sequence
-}
+#import "CHMTouchBackend.h"
 
 // ─── Globals ──────────────────────────────────────────────
 @interface LFPanel : UIView
@@ -64,6 +26,7 @@ static CGSize            gBaseSize;
 static __weak WKWebView *gActiveWV = nil;
 static BOOL              gEnabled  = NO;
 static BOOL              gFarming  = NO;
+static CHMTouchBackend  *gTouch    = nil;
 
 static void snapToEdge(void) {
     UIView *p=gPanel.superview;if(!p)return;
@@ -101,13 +64,16 @@ static void setStartBtn(BOOL on) {
     });
 }
 
-static UIWindow *getKeyWindow(void) {
-    for (UIScene *s in UIApplication.sharedApplication.connectedScenes) {
-        if (![s isKindOfClass:[UIWindowScene class]]) continue;
-        for (UIWindow *w in ((UIWindowScene*)s).windows)
-            if (w.isKeyWindow) return w;
-    }
-    return nil;
+// Tap tại window-local coords dùng CHMTouchBackend
+static void tapAtWindowPoint(CGPoint windowPt) {
+    if (!gTouch.available) return;
+    NSError *err=nil;
+    BOOL ok=[gTouch dispatchPoint:windowPt phase:CHMTouchPhaseDown error:&err];
+    if (!ok) { logMsg([NSString stringWithFormat:@"[Farm] DOWN fail: %@",err.localizedDescription]); return; }
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW,60*NSEC_PER_MSEC),dispatch_get_main_queue(),^{
+        NSError *e2=nil;
+        [gTouch dispatchPoint:windowPt phase:CHMTouchPhaseUp error:&e2];
+    });
 }
 
 @implementation LFPanel
@@ -215,6 +181,7 @@ static UIWindow *getKeyWindow(void) {
     gEnabled=!gEnabled;setStartBtn(gEnabled);
     if(!gEnabled){gFarming=NO;logMsg(@"[Farm] Đã dừng");return;}
     if(!gActiveWV){logMsg(@"[Farm] ⚠ Chưa vào trang Xu");return;}
+    logMsg([NSString stringWithFormat:@"[Farm] Tap backend: %@",gTouch.available?@"✓":@"✗"]);
     if(!gFarming)[self startFarmOnWebView:gActiveWV];
 }
 -(void)doCopy {
@@ -241,11 +208,6 @@ static UIWindow *getKeyWindow(void) {
 -(void)startFarmOnWebView:(WKWebView*)wv {
     if(!wv||!gEnabled||gFarming)return;
     gFarming=YES;logMsg(@"[Farm] Scan tasks...");
-
-    // Log method availability để debug tap approach
-    SEL simSel=NSSelectorFromString(@"_simulateTouchAtPoint:type:");
-    logMsg([NSString stringWithFormat:@"[Farm] _simulateTouchAtPoint:%@",
-        [wv respondsToSelector:simSel]?@"✓":@"✗"]);
 
     NSString *js=@"(function(){"
     "var out=[];"
@@ -295,7 +257,10 @@ static UIWindow *getKeyWindow(void) {
     logMsg([NSString stringWithFormat:@"[Farm] (%ld/%lu): %@",
         (long)(i+1),(unsigned long)tasks.count,label]);
 
-    tapInWebView(wv, wx, wy);
+    // Convert WKWebView local coords → window coords
+    // CHMTouchBackend nhận window-local coords
+    CGPoint windowPt=[wv convertPoint:CGPointMake(wx,wy) toView:wv.window];
+    tapAtWindowPoint(windowPt);
 
     NSTimeInterval delay=(isCheckin||isOpen)?1.5:33.0;
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW,(int64_t)(delay*NSEC_PER_SEC)),
@@ -366,11 +331,22 @@ static id swizzled_init(id self,SEL _cmd,CGRect fr,WKWebViewConfiguration *cfg){
 
 static void setupPanel(void){
     dispatch_async(dispatch_get_main_queue(),^{
-        UIWindow *kw=getKeyWindow();if(!kw)return;
+        // Init CHMTouchBackend
+        gTouch=[[CHMTouchBackend alloc]init];
+
+        UIWindow *kw=nil;
+        for(UIScene *s in UIApplication.sharedApplication.connectedScenes){
+            if(![s isKindOfClass:[UIWindowScene class]])continue;
+            for(UIWindow *w in ((UIWindowScene*)s).windows)
+                if(w.isKeyWindow){kw=w;break;}
+            if(kw)break;
+        }
+        if(!kw)return;
         gBaseSize=CGSizeMake(kw.bounds.size.width-20,220);
         gPanel=[[LFPanel alloc]initWithFrame:CGRectMake(10,60,gBaseSize.width,gBaseSize.height)];
         [kw addSubview:gPanel];[kw bringSubviewToFront:gPanel];
-        logMsg(@"[Farm] Ready — mở trang Xu rồi bấm Bắt đầu");
+        logMsg([NSString stringWithFormat:@"[Farm] Ready | Tap:%@",
+            gTouch.available?@"✓ CHMTouch":@"✗"]);
     });
 }
 
