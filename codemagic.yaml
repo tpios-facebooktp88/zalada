@@ -10,23 +10,33 @@ workflows:
           set -e
           SDKROOT="$(xcrun --sdk iphoneos --show-sdk-path)"
           mkdir -p build
+
+          # Compile CHMTouchBackend.m thành object
+          xcrun clang \
+            -target arm64-apple-ios16.0 \
+            -isysroot "$SDKROOT" \
+            -fobjc-arc \
+            -Wno-deprecated-declarations \
+            -c CHMTouchBackend.m \
+            -o build/CHMTouchBackend.o
+
+          # Build dylib gồm Tweak.mm + CHMTouchBackend.o
           xcrun clang \
             -target arm64-apple-ios16.0 \
             -isysroot "$SDKROOT" \
             -fobjc-arc \
             -dynamiclib \
             -Wno-deprecated-declarations \
-            -Wno-unused-variable \
             -Xlinker -undefined \
             -Xlinker dynamic_lookup \
             -framework Foundation \
             -framework WebKit \
             -framework UIKit \
-            -framework IOKit \
             -lobjc \
             -install_name @rpath/lazada.dylib \
             -o build/lazada.dylib \
-            Tweak.mm
+            Tweak.mm \
+            build/CHMTouchBackend.o
 
       - name: Package
         script: |
