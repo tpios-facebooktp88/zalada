@@ -322,7 +322,7 @@ static NSString *kScript=@""
 static IMP gOrigInit=NULL;
 static id swizzled_init(id self,SEL _cmd,CGRect fr,WKWebViewConfiguration *cfg){
     WKUserScript *s=[[WKUserScript alloc]initWithSource:kScript
-        injectionTime:WKUserScriptInjectionTimeAtDocumentEnd forMainFrameOnly:YES];
+        injectionTime:WKUserScriptInjectionTimeAtDocumentEnd forMainFrameOnly:NO];
     [cfg.userContentController addUserScript:s];
     @try{[cfg.userContentController addScriptMessageHandler:[[LFHandler alloc]init]
                                                        name:@"lazadaFarm"];}@catch(id e){}
