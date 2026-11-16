@@ -307,6 +307,7 @@ static void tapAtWindowPoint(CGPoint windowPt) {
 static NSString *kScript=@""
 "(function(){"
 "if(window._lfDone)return;window._lfDone=true;"
+// Chỉ chạy ở frame chứa laz-coins, không phải mọi iframe
 "var last='';"
 "setInterval(function(){"
 "  var u=location.href;if(u===last)return;last=u;"
